@@ -2,13 +2,13 @@
 
 Описание файлов:
 
-parsing_articles_nytimes.ipynb - выгрузка метаданных по статьям из NYT
+*parsing_articles_nytimes.ipynb* - выгрузка метаданных по статьям из NYT
 
-get_url_body.Rmd - выгрузка содержания статей
+*get_url_body.Rmd* - выгрузка содержания статей
 
-final_file.Rmd - весь ход работы с данными
+*final_file.Rmd* - весь ход работы с данными
 
-statistics.zip:
+*statistics.zip*:
 
     data_stat.xlsx - экономические показатели для стран 
   
