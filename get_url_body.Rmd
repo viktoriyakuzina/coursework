@@ -1,0 +1,168 @@
+---
+title: "Выгрузка метаданных с сайта New York Times"
+author: "Виктория Кузина, БЭК183"
+output: html_document
+---
+
+Подключение библиотек.
+
+```{r}
+library(newsanchor) 
+library(robotstxt)  
+library(httr)       
+library(rvest)     
+library(dplyr)     
+library(stringr)    
+library(tidytext)   
+library(textdata)   
+```
+
+```{r}
+# создание функции для парсинга сайта 
+get_article_body <- function(url){
+  response <- GET(url)
+  if (response$status_code != 200) return(NA)
+  html <- content(x        = response,
+                  type     = "text",
+                  encoding = "UTF-8")
+  parsed_html <- read_html(html)
+  selector <- "article#story div.StoryBodyCompanionColumn div p"
+  parsed_html %>%
+    html_nodes(selector) %>%     
+    html_text() %>%               
+    str_replace_all("\n", "") %>% 
+    paste(collapse = " ")         
+}
+```
+
+# Белоруссия
+
+```{r include=FALSE}
+# загрузка данных
+articles_BL <- read_csv("C:/Users/WW/Desktop/Unversity/course work/data/urls/urls_BL.csv")
+
+# создание пустой колонки для текстов статей
+articles_BL$body <- NA
+
+# создание индикатора выполнения 
+pb <- txtProgressBar(min     = 1,
+                     max     = nrow(articles_BL),
+                     initial = 1,
+                     style   = 3)
+
+# цикл для прохождения по ссылкам статей и применения к ним функции для получения содержания статей
+for (i in 1:nrow(articles_BL)){
+  articles_BL$body[i] <- get_article_body(articles_BL$web_url[i])
+  setTxtProgressBar(pb, i)
+  Sys.sleep(1)
+}
+
+# сохранение данных в формате csv
+write.csv(articles_BL, "C:/Users/WW/Desktop/articles_BL_body.csv")
+```
+
+# Казахстан
+
+```{r include=FALSE}
+# загрузка данных
+articles_KZ <- read_csv("C:/Users/WW/Desktop/Unversity/course work/data/urls/urls_KZ.csv")
+
+# создание пустой колонки для текстов статей
+articles_KZ$body <- NA
+
+# создание индикатора выполнения 
+pb <- txtProgressBar(min     = 1,
+                     max     = nrow(articles_KZ),
+                     initial = 1,
+                     style   = 3)
+
+# цикл для прохождения по ссылкам статей и применения к ним функции для получения содержания статей
+for (i in 1:nrow(articles_KZ)){
+  articles_KZ$body[i] <- get_article_body(articles_KZ$web_url[i])
+  setTxtProgressBar(pb, i)
+  Sys.sleep(1)
+}
+
+# сохранение данных в формате csv
+write.csv(articles_KZ, "C:/Users/WW/Desktop/articles_KZ_body.csv")
+```
+
+# Россия
+
+```{r include=FALSE}
+# загрузка данных
+articles_RU <- read_csv("C:/Users/WW/Desktop/Unversity/course work/data/urls/urls_RU.csv")
+
+# создание пустой колонки для текстов статей
+articles_RU$body <- NA
+
+# создание индикатора выполнения 
+pb <- txtProgressBar(min     = 1,
+                     max     = nrow(articles_RU),
+                     initial = 1,
+                     style   = 3)
+
+# цикл для прохождения по ссылкам статей и применения к ним функции для получения содержания статей
+for (i in 1:nrow(articles_RU)){
+  articles_RU$body[i] <- get_article_body(articles_RU$web_url[i])
+  setTxtProgressBar(pb, i)
+  Sys.sleep(1)
+}
+
+# сохранение данных в формате csv
+write.csv(articles_RU, "C:/Users/WW/Desktop/articles_RU_body.csv")
+```
+
+# Туркменистан
+
+```{r include=FALSE}
+# загрузка данных
+articles_TK <- read_csv("C:/Users/WW/Desktop/Unversity/course work/data/urls/urls_TK.csv")
+
+# создание пустой колонки для текстов статей
+articles_TK$body <- NA
+
+# создание индикатора выполнения 
+pb <- txtProgressBar(min     = 1,
+                     max     = nrow(articles_TK),
+                     initial = 1,
+                     style   = 3)
+
+# цикл для прохождения по ссылкам статей и применения к ним функции для получения содержания статей
+for (i in 1:nrow(articles_TK)){
+  articles_TK$body[i] <- get_article_body(articles_TK$web_url[i])
+  setTxtProgressBar(pb, i)
+  Sys.sleep(1)
+}
+
+# сохранение данных в формате csv
+write.csv(articles_TK, "C:/Users/WW/Desktop/articles_BL_body.csv")
+```
+
+# Украина
+
+```{r include=FALSE}
+# загрузка данных
+articles_UK <- read_csv("C:/Users/WW/Desktop/Unversity/course work/data/urls/urls_UK.csv")
+
+# создание пустой колонки для текстов статей
+articles_UK$body <- NA
+
+# создание индикатора выполнения 
+pb <- txtProgressBar(min     = 1,
+                     max     = nrow(articles_UK),
+                     initial = 1,
+                     style   = 3)
+
+# цикл для прохождения по ссылкам статей и применения к ним функции для получения содержания статей
+for (i in 1:nrow(articles_UK)){
+  articles_UK$body[i] <- get_article_body(articles_UK$web_url[i])
+  setTxtProgressBar(pb, i)
+  Sys.sleep(1)
+}
+
+# сохранение данных в формате csv
+write.csv(articles_UK, "C:/Users/WW/Desktop/articles_BL_body.csv")
+```
+
+

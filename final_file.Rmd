@@ -1,0 +1,2138 @@
+---
+title: "Курсовая работа"
+subtitle: "Ход работы, Виктория Кузина, БЭК183"
+output: html_document
+---
+
+# Подключение библиотек
+
+```{r include=FALSE}
+library(readxl)
+library(boot)
+library(tseries)
+library(latticeExtra)
+library(stats)
+library(forcats)
+library(lfe)
+library(plotly)
+# library(kableExtra)
+library(tidyverse)
+library(data.table)
+library(stringr)
+library(pastecs)
+library(stargazer)
+library(e1071)
+library(reshape2) 
+library(gplots)
+library(performance)
+library(foreign)
+library(ggthemes)
+library(lme4)
+library(xtable)
+library(XML)
+library(moments) 
+library(tidytext)
+library(lubridate)
+library(plm)
+library(SentimentAnalysis)
+library(syuzhet)
+library(textstem)
+library(caret)
+library(broom)
+library(lmtest)
+library(viridis)
+# library(hrbrthemes)
+library(pander)
+library(ggplot2)
+library(knitr)
+library(ggpubr)
+library(car)
+library(sandwich)
+library(tidyr)
+library(xtable)
+library(quanteda)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load_current_gh("trinker/lexicon", "trinker/sentimentr")
+library(RColorBrewer)
+```
+
+# Ход работы 
+
+# Макроэкономические показатели 
+
+## Контрольные переменные
+
+Загрузка данных макроэкономических показателей.
+
+```{r echo=FALSE}
+# загрузка файла с макроэкономическими данными, собранными раннее в excel
+data <- read_excel("data_stat.xlsx", 
+    sheet = "Data (3)")
+```
+
+Приведение данных в порядок.
+
+```{r include=FALSE}
+# подключение параметра, благодаря которому цифры будут отображаться в нормальных значениях, а не с помощью экспонент
+options(scipen=999)
+# изменение названия "Russian Federation" в "Russia" для удобства
+data$`Country Name` = ifelse(data$`Country Name` == 'Russian Federation', 'Russia', as.character(data$`Country Name`))
+# переименование столбцов для удобства
+colnames(data) = c('Metrics', 'Metric_Code', 'Country', 'Country_Code', 1991:2020)
+# удаление ненужного показателя инфляции из датасета
+data = data %>% filter(!Metrics %in% c('Inflation, consumer prices (annual %)'))
+# приведение данных к нужному типу
+data[, which(colnames(data) %in% c(1991:2020))] = lapply(data[, which(colnames(data) %in% c(1991:2020))], as.numeric)
+data[, which(colnames(data) %in% c('Metric_Code', 'Country', 'Country_Code'))] = lapply(data[, which(colnames(data) %in% c('Metric_Code', 'Country', 'Country_Code'))], as.factor)
+# округление численных значений до трёх знаков после запятой
+data[, which(colnames(data) %in% c(1991:2020))] = round(data[, which(colnames(data) %in% c(1991:2020))], 3) 
+```
+
+Приведение данных к длинному и широкому типу для дальнейшего использования в анализе.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# приведение данных к длинному формату относительно годов и стран
+data_long <- melt(data, id.vars = c("Metrics", "Country"))
+data_long = data_long %>% filter(str_detect(value, '[0-9]+') & str_detect(value, '[0-9]+'))
+# приведение колонки значений экономических метрик к численному типу
+data_long$value = as.numeric(data_long$value) 
+# приведение данных к широкому формату относительно экономических метрик
+data_spread = spread(data_long, Metrics, value)
+# переименование колонок датасета для удобства 
+colnames(data_spread) = c('Country', 'year', 'FDI_share_GDP', 'FDI', 'GDP', 'GDP_growth', 'GDP_per_capita', 'GDP_growth_percapita', 'Inflation', 'Unemployment')
+# замена нулевых значений инвестиций и доли инвестиций от ВВП для того, чтобы в дальнейшем в описательной статистике в минимальном значении не отображились нули
+data_spread$FDI_share_GDP = ifelse(data_spread$FDI_share_GDP == 0, NA, data_spread$FDI_share_GDP)
+data_spread$FDI = ifelse(data_spread$FDI == 0, NA, data_spread$FDI)
+# сохранение готового датасета 
+write_csv(data_spread, 'data_controlcountry.csv')
+```
+
+Создание отдельных датасетов с макроэкономическими данными для каждой страны.
+
+```{r}
+# создание функции фильтрации по стране для удобства 
+controls_metrics = function(name, country){
+  data = data_spread %>% filter(Country == name) 
+return(data)}
+# создание отдельных датасетов для каждой страны
+rus_controls = controls_metrics('Russia')
+kaz_controls = controls_metrics('Kazakhstan')
+blr_controls = controls_metrics('Belarus')
+ukr_controls = controls_metrics('Ukraine')
+tkm_controls = controls_metrics('Turkmenistan')
+# создание датасета для контрольных переменных без включения инвестиций
+data_controlcountry = data_spread %>% select(-FDI_share_GDP, -FDI)
+```
+
+
+### Описательная статистика макроэкономических показателей
+
+Подсчёт описательных статистик макроэкономических показателей.
+
+```{r}
+# создание функции для подсчёта описательных статистик для удобства 
+descriptive = function(data){data.frame(sapply(data, function(x) c(
+                            "Min" = round(min(x, na.rm = TRUE),2),
+                            "Max" = round(max(x, na.rm = TRUE),2),
+                            "Mean"= round(mean(x,na.rm=TRUE),2),
+                            "Standard deviation" = round(sd(x, na.rm = TRUE),2))))}
+# создание функции фильтрации по стране для удобства 
+descriptive_for_country = function(data, name){
+  data = descriptive(data[,3:ncol(data)]) %>% mutate(Country = name)
+  return(data)}
+# Россия
+rus_controls_stat = descriptive_for_country(rus_controls, 'Russia')
+# Белоруссия
+blr_controls_stat = descriptive_for_country(blr_controls, 'Belarus')
+# Казахстан
+kaz_controls_stat = descriptive_for_country(kaz_controls, 'Kazakhstan')
+# Туркменистан
+tkm_controls_stat = descriptive_for_country(tkm_controls, 'Turkmenistan')
+# Украина
+ukr_controls_stat = descriptive_for_country(ukr_controls, 'Ukraine')
+# создание общего датасета описательных статистик для всех стран
+all_controls_stat = rus_controls_stat %>% rbind(blr_controls_stat, kaz_controls_stat) %>% rbind(tkm_controls_stat, ukr_controls_stat) 
+```
+
+## Инвестиции
+
+Работа с инвестициями, которые далее будут зависимой переменной. Создание отдельных датасетов по инвестициям для каждой страны.
+
+```{r}
+# создание отдельного датасета для инвестиций 
+investments = data_spread %>% select(FDI_share_GDP, FDI, year, Country)
+# приведение колонки года к численному типу без потери "названия" года
+investments$year = as.numeric(as.character(investments$year))
+# создание функции фильтрации по стране для удобства 
+get_correct_tables = function(name){
+  data_name = investments %>% filter(Country == name) %>% select(-Country)
+  return(data_name)}
+# создание отдельных датасетов для каждой страны
+bl = get_correct_tables("Belarus")
+ru = get_correct_tables("Russia")
+uk = get_correct_tables("Ukraine")
+kz = get_correct_tables("Kazakhstan")
+tr = get_correct_tables("Turkmenistan")
+# panel_data = bl %>% rbind(ru, uk) %>% rbind(kz, tr) 
+# сохранение готового датасета 
+write.csv(investments,'investments_countries.csv')
+# ADF тесты на стационарность 
+# adf.test(bl[2:nrow(bl),]$FDI) # p-value = 0.8261 - unit root
+# adf.test(ru$FDI) # p-value = 0.9383 - unit root
+# adf.test(uk[2:nrow(uk),]$FDI) # p-value = 0.6888 - unit root
+# adf.test(kz[2:nrow(kz),]$FDI) # p-value = 0.99 - unit root
+# adf.test(tr[3:nrow(tr),]$FDI) # p-value = 0.8827 - unit root
+```
+
+Построение панельных графиков инвестиций.
+
+### График инвестиций c параметрической шкалой 
+
+```{r message=FALSE, warning=FALSE}
+# создание графика с использованием различных параметров для лучшей визуализации
+investments_pseudo = investments %>% ggplot(mapping = aes(x = year, y = FDI/1000000000, color = Country)) + 
+  geom_line() + 
+  geom_point() + 
+     labs(#title = "Динамика притока прямых иностранных инвестиций в странах бывшего СССР",
+       x = "",
+       y = "Прямые инвестиции (млрд. долл. США)",
+       color = "Страна") + 
+  theme_classic(base_size = 14) +
+  scale_color_brewer(palette = "Set1", labels=c("Белоруссия", "Казахстан", "Россия", "Туркменистан", "Украина")) + 
+  theme(legend.position = c(0.15, 0.85), legend.text = element_text(size=12)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 22)) + 
+  scale_y_continuous(trans = scales::pseudo_log_trans(base = 5), breaks = scales::pretty_breaks(n = 7))
+investments_pseudo
+# сохранение графика в png-формате
+ggsave("investments_pseudo.pdf", width = 10, height = 7)
+```
+
+
+# Тональность
+
+Приведение текстов статей в порядок.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# загрузка ранее выгруженных статей с полным содержанием
+# articles_KZ_body <- read_csv("~/Downloads/viks/body/articles_KZ_body.csv")
+# articles_RU_body <- read_csv("~/Downloads/viks/body/articles_RU_body_withoutna.csv")
+# articles_TK_body <- read_csv("~/Downloads/viks/body/articles_TK_body.csv")
+# articles_BL_body <- read_csv("~/Downloads/viks/body/articles_BL_body.csv")
+# articles_UK_body <- read_csv("~/Downloads/viks/body/articles_UK_body.csv")
+```
+
+## Очистка от знаков пунктуации.
+
+Приведение текстов к нормальному виду и очистка от ненужных сегментов.
+
+```{r}
+# # создание функции для очистки текста для каждой страны для удобства
+# clean_text = function(data, name){
+#   data = data %>% filter(!is.na(body))
+#   # удаление ненужных знаков препинания
+#   data$body = str_replace_all(data$body, "\\&quot\\;", " ")
+#   data$body = str_replace_all(data$body, "\\&apos\\;", " ")
+#   # удаление пунктуационных знаков
+#   data$body = str_replace_all(data$body, "[[:punct:]]", "")
+#   # удаление цифр
+#   data$body = str_replace_all(data$body, "[[:digit:]]", "")
+#   # приведение к нижнему регистру
+#   data$body = str_to_lower(data$body)
+#   # удаление несодержательных букв внутри скобок "< >"
+#   data$body = str_replace_all(data$body, '<.*>', '')
+#   # удаление несодержательных слов из одной|двух букв 
+#   data$body = gsub(" *\\b(?<!-)\\p{L}{1,2}(?!-)\\b *", " ", data$body, perl=T)
+#   # создание id и удаление ненужных колонок
+#   data = data  %>% mutate(id = 1:nrow(data)) %>% select(id, web_url, headline, pub_date, body)
+#   # сохранение датасета
+#   write_csv(data, paste("~/Downloads/viks/body/cleaned/", name, ".csv", sep =''))
+# return(data)}
+# 
+# # Украина
+# articles_UK_body = clean_text(articles_UK_body, 'articles_UK_body_clean')
+# # Туркменистан
+# articles_TK_body = clean_text(articles_TK_body, 'articles_TK_body_clean')
+# # Россия
+# articles_RU_body = clean_text(articles_RU_body, 'articles_RU_body_clean')
+# # Казахстан
+# articles_KZ_body = clean_text(articles_KZ_body, 'articles_KZ_body_clean')
+# # Белоруссия
+# articles_BL_body = clean_text(articles_BL_body, 'articles_BL_body_clean')
+```
+
+```{r message=FALSE, warning=FALSE}
+# загрузка уже почищенных статей, так как они долго грузятся
+articles_KZ_body <- read_csv("~/Downloads/viks/body/cleaned/articles_KZ_body_clean.csv")
+articles_RU_body <- read_csv("~/Downloads/viks/body/cleaned/articles_RU_body_clean.csv")
+articles_UK_body <- read_csv("~/Downloads/viks/body/cleaned/articles_UK_body_clean.csv")
+articles_TK_body <- read_csv("~/Downloads/viks/body/cleaned/articles_TK_body_clean.csv")
+articles_BL_body <- read_csv("~/Downloads/viks/body/cleaned/articles_BL_body_clean.csv")
+
+# создание колонки с названием страны
+articles_TK_body$Country = 'Туркменистан'
+articles_UK_body$Country = 'Украина'
+articles_RU_body$Country = 'Россия'
+articles_BL_body$Country = 'Белоруссия'
+articles_KZ_body$Country = 'Казахстан'
+```
+
+
+## Сентименты 
+
+Подсчёт сентиментов в статьях и сборка готовых датасетов с подсчитанными тональностями.
+
+```{r message=FALSE, warning=FALSE}
+# загрузка ранее полученных сентиментов, так как они грузятся по несколько дней
+KZ_sentiments_articles <- read_csv("~/Downloads/viks/sentiments/KZ_sentiments_articles.csv")
+RU_sentiments_articles <- read_csv("~/Downloads/viks/sentiments/RU_sentiments_articles.csv")
+RU_sentiments_articles = RU_sentiments_articles %>% filter(!is.na(body))
+UK_sentiments_articles <- read_csv("~/Downloads/viks/sentiments/UK_sentiments_articles.csv")
+UK_sentiments_articles = UK_sentiments_articles %>% filter(!is.na(body))
+TK_sentiments_articles <- read_csv("~/Downloads/viks/sentiments/TK_sentiments_articles.csv")
+BL_sentiments_articles <- read_csv("~/Downloads/viks/sentiments/BL_sentiments_articles.csv")
+```
+
+```{r}
+# создание функции для получения сентиментов для каждой страны для удобства
+get_sentiments = function(data, name){
+  data = data %>% filter(!is.na(body))
+  data = data %>% filter(str_detect(body, '[a-z]+') == TRUE)
+  data = data %>% group_by(year = year(pub_date)) %>% filter(year > 1990 & year < 2021 & body != '' & body != ' ' & body != '  ')  
+  sentiments_articles = sentiment(get_sentences(data$body))
+  data$sentiment = sentiments_articles$sentiment
+  write_csv(data, paste("~/Downloads/viks/sentiments/", name, ".csv", sep =''))
+return(data)}
+
+# Казахстан
+# KZ_sentiments_articles = get_sentiments(articles_KZ_body,  'KZ_sentiments_articles')
+# Белоруссия
+# BL_sentiments_articles = get_sentiments(articles_BL_body, 'BL_sentiments_articles')
+# Россия
+# RU_sentiments_articles = get_sentiments(articles_RU_body, 'RU_sentiments_articles')
+# Туркменистан
+# TK_sentiments_articles = get_sentiments(articles_TK_body, 'TK_sentiments_articles')
+# Украина
+# UK_sentiments_articles = get_sentiments(articles_UK_body, 'KZ_sentiments_articles')
+```
+
+## Таблица частот
+
+Подсчёт среднего значения тональностей для каждого года по каждой стране.
+
+```{r}
+# создание функции для подсчёта средних тональностей для каждой страны
+frequnecy_sentiment_table = function(data, name){
+  data = data %>% filter(!is.na(body))
+  data = data %>% group_by(year = year(pub_date)) %>% filter(year > 1990 & year < 2021 & body != '' & body != ' ' & body != '  ') %>% summarise(Average_sentiments = mean(sentiment))
+  data$country = name
+  data$diff_sentiment = c(0, diff(data$Average_sentiments))
+  return(data)}
+
+# Казахстан
+KZ_ave_sent = frequnecy_sentiment_table(KZ_sentiments_articles, 'Казахстан')
+UK_ave_sent = frequnecy_sentiment_table(UK_sentiments_articles, 'Украина')
+# Россия
+RU_ave_sent = frequnecy_sentiment_table(RU_sentiments_articles, 'Россия')
+# Туркменистан
+TK_ave_sent = frequnecy_sentiment_table(TK_sentiments_articles, 'Туркменистан')
+# добавление строчки с пустым значением средней тональности для Туркменистана, чтобы далее при соединении датасетов воедино не возникла ошибка разных размеров
+TK_ave_sent = TK_ave_sent %>% add_row(year = 1991, Average_sentiments = NA, country = 'Туркменистан') %>% arrange(year)
+# Белоруссия
+BL_ave_sent = frequnecy_sentiment_table(BL_sentiments_articles, 'Белоруссия')
+
+# создание общего датасета сентиментов для построения графиков
+panel_data_sents = KZ_ave_sent %>% rbind(UK_ave_sent, RU_ave_sent) %>% rbind(TK_ave_sent, BL_ave_sent)
+```
+
+## График тональности 
+
+```{r message=FALSE, warning=FALSE}
+# график тональности для стран
+panel_graph_sent = panel_data_sents %>% ggplot(mapping = aes(x = year, y = Average_sentiments, color = country)) + 
+  geom_line(size = 1) + 
+  geom_point() +
+     labs(#title = "Динамика притока прямых иностранных инвестиций в странах бывшего СССР",
+       x = "", y = "Средняя тональность",
+       color = "Страна") + 
+  theme_classic(base_size = 14) +
+  scale_color_brewer(palette = "Set2") + 
+  theme(legend.position = c(0.8, 0.85), legend.text = element_text(size=12)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 22)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 15)) +
+  geom_hline(yintercept = 0)
+panel_graph_sent
+# сохранение графика в png-формате
+ggsave("panel_graph_sent.png", width = 10, height = 7)
+```
+
+## График панельный для сентиментов
+
+Анализ отклонения средних значений тональности по каждой стране от общей тональности для всех стран.
+
+```{r message=FALSE, warning=FALSE}
+# подсчёт средней тональности по всем странам воедино
+mean_sent_all = panel_data_sents %>% group_by(year) %>% summarise(average_sent_all = mean(Average_sentiments, na.rm = TRUE))
+# соединение датасета средней тональности по каждой стране и датасета средней тональности для всех стран для построения графика
+panel_data_sents = left_join(panel_data_sents, mean_sent_all)
+```
+
+Построение графика.
+
+```{r message=FALSE, warning=FALSE}
+# построение графика с изменением параметров для лучшей визуализации
+panel_sent = panel_data_sents %>% ggplot() + 
+  geom_line(mapping = aes(x = year, y = Average_sentiments, colour = 'slategray')) +
+   geom_line(mapping = aes(x = year, y = average_sent_all, colour = 'tomato')) +
+  facet_wrap(~ country, scales = 'free') + 
+  theme_classic(base_size = 14) +
+  theme(axis.text.x = element_text(size = 10, hjust = 1), legend.position = c(0.85, 0.25), legend.text = element_text(size=12), strip.background = element_blank()) +
+  labs(y = 'Средняя тональность', 
+       x = ' ') + 
+  scale_colour_manual(name = "Обозначения", 
+                      values = c('slategray','tomato'), 
+                      labels = c("Средняя тональность для страны", "Общая средняя тональность")) +
+    coord_cartesian(xlim =c(1990, 2020)) +
+    scale_y_continuous(breaks = scales::pretty_breaks(n = 7)) +
+    geom_hline(yintercept = 0, alpha = 0.8)
+panel_sent
+# сохранение графика
+ggsave("panel_sent.png", width = 10, height = 7)
+```
+
+
+## Описательная статистика сентиментов
+
+Подсчёт описательной статистики для всех стран.
+
+```{r}
+# вычисление описательной статистики для каждой страны
+decriptive_sentiments = panel_data_sents %>% group_by(country) %>% summarise(Maximum = round(max(Average_sentiments, na.rm = TRUE),3), Minimum = round(min(Average_sentiments, na.rm = TRUE),3), Mean = round(mean(Average_sentiments, na.rm = TRUE),3), Standard_Deviation = round(sd(Average_sentiments, na.rm = TRUE),3)) # сохранение датасета
+write.csv(decriptive_sentiments, 'decriptive_sentiments.csv')
+```
+
+# Частота статей 
+
+Подсчёт количества статей для каждой страны по каждому году.
+
+## Количество статей в общем
+
+Подсчёт количества статей для каждой страны до фильтрации.
+
+```{r message=FALSE, warning=FALSE}
+# загрузка данных по количеству статей
+freq_articles <- read_excel("~/Downloads/viks/freq_articles.xlsx")
+# переименование колонок датасета
+colnames(freq_articles) = c('year', 'Belarus_count_articles', 'Kazakhstan_count_articles', 'Russia_count_articles', 'Turkmenistan_count_articles', 'Ukraine_count_articles')
+# фильтрация датасета по нужному году
+freq_articles = freq_articles %>% filter(year > 1990 & year < 2021)
+```
+
+```{r message=FALSE, warning=FALSE}
+# sum(freq_articles$Belarus_count_articles) # 5069 - количество статей про Белоруссию
+# sum(freq_articles$Kazakhstan_count_articles) # 5387 - количество статей про Казахстан
+# sum(freq_articles$Russia_count_articles) # 158623 - количество статей про Россию
+# sum(freq_articles$Turkmenistan_count_articles) # 1212 - количество статей про Туркменистан
+# sum(freq_articles$Ukraine_count_articles) # 27939 - количество статей про Украину
+
+# создание датасета для графика общего количества статей по странам
+hist = data_frame(Country = c('Белоруссия', "Казахстан", "Россия", "Туркменистан", "Украина"), Quantity = c(5069, 5387, 158623, 1212, 27939))
+# построение графика
+ggplot(data=hist, aes(x=reorder(Country, -Quantity), y=Quantity)) +
+  geom_bar(stat="identity", fill="#62869D")+
+  geom_text(aes(label=Quantity), vjust=-0.3, size=3.5)+
+  theme_classic(base_size = 12) +
+  labs(subtitle = 'Первоначальное количество статей\nпо каждой стране',
+       x = 'Страна',
+       y = 'Количество статей')
+# сохранение графика
+ggsave('basequantity.png', width = 5.3)
+```
+
+## Актуальное количество статей с текстами
+
+Подсчёт количества статей для каждой страны после фильтрации.
+
+```{r message=FALSE, warning=FALSE}
+# создание колонки с названием страны для каждого датасета тональностей
+KZ_sentiments_articles$Country = 'Kazakhstan'
+UK_sentiments_articles$Country = 'Ukraine'
+RU_sentiments_articles$Country = 'Russia'
+TK_sentiments_articles$Country = 'Turkmenistan'
+BL_sentiments_articles$Country = 'Belarus'
+RU_sentiments_articles = RU_sentiments_articles %>%  select(-X1)
+UK_sentiments_articles = UK_sentiments_articles %>%  select(-X1)
+# объединение датасетов для каждой страны в один общий датасет
+sentiments_all =  KZ_sentiments_articles %>% rbind(UK_sentiments_articles, RU_sentiments_articles) %>% rbind(TK_sentiments_articles, BL_sentiments_articles)
+# чистка датасета от пустых значений и подсчет актуального количества статей для каждой страны по каждому году
+sentiments_all_actual = sentiments_all %>% filter(!is.na(body) & body != '' & body != ' ' & body != '  ') %>% filter(year > 1990 & year < 2021) %>% group_by(year, Country) %>% summarise(Freq = n()) %>% arrange(year)
+# приведение данных в широкий формат относительно страны, чтобы одна строка относилась к одному году
+sentiments_all_actual = spread(sentiments_all_actual, key = Country, value = Freq)
+# сохранение датасета
+write_csv(xtable(sentiments_all_actual), '~/Downloads/viks/freq_articles_actual.csv')
+# создание для каждой страны отдельного датасета по количеству статей
+kz_articles_actual = sentiments_all_actual %>% select(Kazakhstan)
+blr_articles_actual = sentiments_all_actual %>% select(Belarus)
+rus_articles_actual = sentiments_all_actual %>% select(Russia)
+trk_articles_actual = sentiments_all_actual %>% select(Turkmenistan)
+ukr_articles_actual = sentiments_all_actual %>% select(Ukraine)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# sum(sentiments_all_actual$Belarus) # 4626 - количество статей про Белоруссию
+# sum(sentiments_all_actual$Kazakhstan) # 4880 - количество статей про Казахстан
+# sum(sentiments_all_actual$Russia) # 135865 - количество статей про Россию
+# sum(sentiments_all_actual$Turkmenistan, na.rm=TRUE) # 1091 - количество статей про Туркменистан
+# sum(sentiments_all_actual$Ukraine) # 22621 - количество статей про Украину
+
+# создание датасета для графика оактуального бщего количества статей по странам
+hist2 = data_frame(Country = c('Белоруссия', "Казахстан", "Россия", "Туркменистан", "Украина"), Quantity = c(4626, 4880, 135865, 1091, 22621))
+# построение графика
+ggplot(data=hist2, aes(x=reorder(Country, -Quantity), y=Quantity)) +
+  geom_bar(stat="identity", fill="#5C7D92")+
+  geom_text(aes(label=Quantity), vjust=-0.3, size=3.5)+
+  theme_classic(base_size = 12) +
+  labs(subtitle = 'Количество статей по каждой стране\nпосле фильтрации',
+       x = 'Страна',
+       y = 'Количество статей')
+# сохранение графика
+ggsave('actualquantity.png', width = 5.3)
+```
+
+## Нормирование количества статей
+
+Подсчет прироста статей в каждый период для каждой страны.
+
+```{r}
+kz_articles_actual$growth_articles = with(kz_articles_actual, ave(Kazakhstan,
+                      FUN=function(x) c(NA, (diff(x)/x[-length(x)])*100) ))
+blr_articles_actual$growth_articles = with(blr_articles_actual, ave(Belarus,
+                      FUN=function(x) c(NA, (diff(x)/x[-length(x)])*100) ))
+rus_articles_actual$growth_articles = with(rus_articles_actual, ave(Russia,
+                      FUN=function(x) c(NA,(diff(x)/x[-length(x)])*100)))
+trk_articles_actual$growth_articles = with(trk_articles_actual, ave(Turkmenistan,
+                      FUN=function(x) c(NA, (diff(x)/x[-length(x)])*100) ))
+ukr_articles_actual$growth_articles = with(ukr_articles_actual, ave(Ukraine,
+                      FUN=function(x) c(NA, (diff(x)/x[-length(x)])*100) ))
+```
+
+
+# Пересечения статей
+
+## Статьи про Казахстан
+
+Поиск упоминания Казахстана в других статьях.
+
+```{r}
+articles_interception = function(data, pattern, name){
+  data$quantity = str_detect(data$body, pattern)
+  data_final = data.frame(table(data$quantity)[2])
+  colnames(data_final) = name
+  return(data_final)}
+
+tkkz = articles_interception(articles_TK_body, 'kazak|kazakh|kazakhstan', 'about_KZ_in_TK')
+blkz = articles_interception(articles_BL_body, 'kazak|kazakh|kazakhstan', 'about_KZ_in_BL')
+ukkz = articles_interception(articles_UK_body, 'kazak|kazakh|kazakhstan', 'about_KZ_in_UK')
+rukz = articles_interception(articles_RU_body, 'kazak|kazakh|kazakhstan', 'about_KZ_in_RU')
+
+artciles_interceptions = function(data, data2, data3, data4, exact_country, name, name2, name3, name4){
+  other_articles_about = data %>% cbind(data2, data3) %>% cbind(data4)
+  rownames(other_articles_about) = c(exact_country)
+  other_articles_about$exact_country = 0
+  colnames(other_articles_about) = c(name, name2,  name3, name4, exact_country)
+  return(other_articles_about)}
+
+other_articles_about_kz = artciles_interceptions(blkz, tkkz, rukz, ukkz, exact_country = "Казахстан", 'Белоруссия', 'Туркменистан',  "Россия", "Украина")
+```
+
+## Статьи про Белоруссию
+
+Поиск упоминания Белоруссии в других статьях.
+
+```{r}
+tkbl = articles_interception(articles_TK_body, 'belarus|belarusian', 'about_BL_in_TK')
+kzbl = articles_interception(articles_KZ_body, 'belarus|belarusian', 'about_BL_in_KZ')
+ukbl = articles_interception(articles_UK_body, 'belarus|belarusian', 'about_BL_in_UK')
+rubl = articles_interception(articles_RU_body, 'belarus|belarusian', 'about_BL_in_RU')
+
+other_articles_about_bl = artciles_interceptions(kzbl, ukbl, tkbl, rubl, exact_country = "Белоруссия", 'Казахстан', 'Украина',  "Туркменистан", "Россия")
+```
+
+## Статьи про Туркменистан
+
+Поиск упоминания Туркменистана в других статьях.
+
+```{r}
+bltk = articles_interception(articles_BL_body, 'turkmenia|turkmenistan|turkmen', 'about_TK_in_BL')
+kztk = articles_interception(articles_KZ_body, 'turkmenia|turkmenistan|turkmen', 'about_TK_in_KZ')
+uktk = articles_interception(articles_UK_body, 'turkmenia|turkmenistan|turkmen', 'about_TK_in_UK')
+rutk = articles_interception(articles_RU_body, 'turkmenia|turkmenistan|turkmen', 'about_TK_in_RU')
+
+other_articles_about_tk = artciles_interceptions(kztk, uktk, bltk, rutk, exact_country = "Туркменистан", 'Казахстан', 'Украина',  "Белоруссия", "Россия")
+```
+
+## Статьи про Украину
+
+Поиск упоминания Украины в других статьях.
+
+```{r}
+bluk = articles_interception(articles_BL_body, 'ukrain|ukrainian|ukraine|ukraina', 'about_UK_in_BL')
+kzuk = articles_interception(articles_KZ_body, 'ukrain|ukrainian|ukraine|ukraina', 'about_UK_in_KZ')
+tkuk = articles_interception(articles_TK_body, 'ukrain|ukrainian|ukraine|ukraina', 'about_UK_in_TK')
+ruuk = articles_interception(articles_RU_body, 'ukrain|ukrainian|ukraine|ukraina', 'about_UK_in_RU')
+
+other_articles_about_uk = artciles_interceptions(kzuk, tkuk, bluk, ruuk, exact_country = "Украина", 'Казахстан', 'Туркменистан',  "Белоруссия", "Россия")
+```
+
+## Статьи про Россию
+
+Поиск упоминания России в других статьях.
+
+```{r}
+blru = articles_interception(articles_BL_body, 'russian|russia|rossiya', 'about_RU_in_BL')
+kzru = articles_interception(articles_KZ_body, 'russian|russia|rossiya', 'about_RU_in_KZ')
+tkru = articles_interception(articles_TK_body, 'russian|russia|rossiya', 'about_RU_in_TK')
+ukru = articles_interception(articles_UK_body, 'russian|russia|rossiya', 'about_RU_in_UK')
+
+other_articles_about_ru = artciles_interceptions(kzru, tkru, blru, ukru, exact_country = "Россия", 'Казахстан', 'Туркменистан',  "Белоруссия", "Украина")
+```
+
+
+```{r}
+overall_intercept = other_articles_about_bl %>% rbind(other_articles_about_kz, other_articles_about_ru) %>% rbind(other_articles_about_tk, other_articles_about_uk)
+overall_intercept = overall_intercept[ , order(names(overall_intercept))]
+write.csv(overall_intercept, 'overall_intercept.csv')
+```
+
+## Таблица от общего упоминания страны
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+intercept = overall_intercept
+
+all_about_artciles = function(name, x){
+  intercept$all_in = sum(intercept[, which(colnames(intercept) %in% name)])
+intercept[, which(colnames(intercept) %in% name)] =  round(x/intercept$all_in*100, 1)
+  return(intercept)}
+
+intercept = all_about_artciles('Белоруссия', x = intercept$Белоруссия)
+intercept = all_about_artciles('Казахстан', x = intercept$Казахстан)
+intercept = all_about_artciles('Россия', x = intercept$Россия)
+intercept = all_about_artciles('Туркменистан', x = intercept$Туркменистан)
+intercept = all_about_artciles('Украина', x = intercept$Украина)
+intercept = intercept %>% select(-all_in)
+```
+
+
+# Эмоции
+
+## Выгрузка эмоций
+
+```{r}
+get_emotions = function(data){
+emotions_articles = emotion(get_sentences(articles_TK_body$body))
+length(unique(emotions_articles$word_count))
+return(emotions_articles)
+}
+
+# KZ_emotions_articles = get_emotions(articles_KZ_body)
+# write.csv(KZ_emotions_articles, 'C:/Users/WW/Desktop/университет/3 курс/курсовая/работа с данными/эмоции/KZ_emotions_articles.csv')
+# 
+# BL_emotions_articles = get_emotions(articles_BL_body)
+# write.csv(BL_emotions_articles, 'C:/Users/WW/Desktop/университет/3 курс/курсовая/работа с данными/эмоции/BL_emotions_articles.csv')
+
+# UK_emotions_articles = get_emotions(articles_UK_body)
+# write.csv(UK_emotions_articles, 'C:/Users/WW/Desktop/университет/3 курс/курсовая/работа с данными/эмоции/UK_emotions_articles_2.csv')
+
+# RU_emotions_articles = get_emotions(articles_RU_body)
+# write.csv(RU_emotions_articles, 'C:/Users/WW/Desktop/университет/3 курс/курсовая/работа с данными/эмоции/RU_emotions_articles.csv')
+
+# TK_emotions_articles = get_emotions(articles_TK_body)
+# write.csv(TK_emotions_articles, 'C:/Users/WW/Desktop/университет/3 курс/курсовая/работа с данными/эмоции/TK_emotions_articles.csv')
+```
+
+## Графики эмоциональности
+
+```{r}
+# создание датасета для каждой страны с эмоциями
+emotions_articles_prep = function(emotions_articles, articles_body){
+emotions_articles = emotions_articles %>% filter(emotion != 0)
+emotions = emotions_articles %>% select(element_id, word_count, emotion_type, emotion_count, emotion)
+emotions$year = ifelse(emotions$element_id %in% articles_body$id, year(articles_body$pub_date), 'net')
+emotions_count = emotions %>% filter(year > 1990 & year < 2021) %>% select(element_id, emotion_type, emotion_count, year, emotion, word_count)
+emotions_count = emotions_count %>% group_by(emotion_type, year) %>% mutate(sum = sum(emotion_count))
+emotions_count$emotion_type = ifelse(str_detect(as.character(emotions_count$emotion_type), 'negated'), NA, emotions_count$emotion_type)
+emotions_count = emotions_count %>% filter(!is.na(emotion_type))
+return(emotions_count)}
+
+# цветовая палитра для столбчатой диаграммы
+values_cols_neg = c("anger" = "#D33838", "anticipation" = "#16AF44", "disgust" = "#922B21", "fear" = '#34495E', "joy" = '#2ECC71', "sadness" = '#2980B9', "surprise" = '#F4D03F', "trust" = '#1ABC9C')
+
+# цветовая палитра для линейной диаграммы
+values_cols_line = c("anger" = "#CD6155", "anticipation" = "#F39C12", "disgust" = "#A569BD", "fear" = '#5DADE2', "joy" = '#58D68D', "sadness" = '#2980B9', "surprise" = '#F4D03F', "trust" = '#1ABC9C')
+
+# график соотношения долей эмоций
+emotions_graph_countries = function(emotions_count, name_subtitle){
+emotions_graph = emotions_count %>% arrange(year) %>% group_by(year, emotion_type) %>% summarise(sum = sum(emotion_count)) %>% mutate(all_emotions = sum(sum), prop_emotion = sum/all_emotions) %>% ggplot() + 
+  geom_bar(mapping = aes(y = sum, x = year, fill = emotion_type), stat = 'identity', position="fill") +
+  theme_classic(base_size = 14) +
+  labs(subtitle = name_subtitle, x = " ", y = "Доля эмоций") +
+  scale_fill_manual("Тип эмоции", values = values_cols_neg) + 
+  theme(legend.text = element_text(size=12)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 7)) 
+return(emotions_graph)}
+
+# график линейных для эмоций
+emotions_graph_countries_line = function(emotions_count, name){
+emotions_graph_line = emotions_count %>% arrange(year) %>% group_by(year, emotion_type) %>% summarise(sum = sum(emotion_count)) %>% mutate(all_emotions = sum(sum), prop_emotion = sum/all_emotions) %>% ggplot(mapping = aes(y = sum, x = year, color = emotion_type)) + 
+  geom_line(size = 0.4) +
+  theme_classic(base_size = 14) +
+  labs(subtitle = name, x = " ", y = "Доля эмоций") +
+  scale_color_manual("Тип эмоции", values = values_cols_line) + 
+  theme(legend.text = element_text(size=12)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 7)) 
+return(emotions_graph_line)}
+```
+
+## Туркменистан
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+TK_emotions_articles <- read_csv("~/Downloads/viks/emotions/TK_emotions_articles.csv")
+TK_emotions_count = emotions_articles_prep(TK_emotions_articles, articles_TK_body)
+TK_emotions_graph = emotions_graph_countries(TK_emotions_count, 'Туркменистан')
+ggsave('TK_emotions_graph.png', width = 10)
+TK_emotions_graph_line = emotions_graph_countries_line(TK_emotions_count, 'Туркменистан')
+ggsave('TK_emotions_graph_line.png', width = 10)
+```
+
+## Казахстан
+
+```{r message=FALSE, warning=FALSE}
+KZ_emotions_articles <- read_csv("~/Downloads/viks/emotions/KZ_emotions_articles.csv")
+KZ_emotions_count = emotions_articles_prep(KZ_emotions_articles, articles_KZ_body)
+KZ_emotions_graph = emotions_graph_countries(KZ_emotions_count, 'Казахстан')
+ggsave('KZ_emotions_graph.png', width = 10)
+KZ_emotions_graph_line = emotions_graph_countries_line(KZ_emotions_count, 'Казахстан')
+ggsave('KZ_emotions_graph_line.png', width = 10)
+```
+
+## Россия
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+RU_emotions_articles <- read_csv("~/Downloads/viks/emotions/RU_emotions_articles.csv")
+RU_emotions_count = emotions_articles_prep(RU_emotions_articles, articles_RU_body)
+RU_emotions_graph = emotions_graph_countries(RU_emotions_count, 'Россия')
+ggsave('RU_emotions_graph.png', width = 10)
+RU_emotions_graph_line = emotions_graph_countries_line(RU_emotions_count, 'Россия')
+ggsave('RU_emotions_graph_line.png', width = 10)
+```
+
+## Белоруссия 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+BL_emotions_articles <- read_csv("~/Downloads/viks/emotions/BL_emotions_articles.csv")
+BL_emotions_count = emotions_articles_prep(BL_emotions_articles, articles_BL_body)
+BL_emotions_graph = emotions_graph_countries(BL_emotions_count, 'Белоруссия')
+ggsave('BL_emotions_graph.png', width = 10)
+BL_emotions_graph_line = emotions_graph_countries_line(BL_emotions_count, 'Белоруссия')
+ggsave('BL_emotions_graph_line.png', width = 10)
+```
+
+## Украина 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+UK_emotions_articles <- read_csv("~/Downloads/viks/emotions/UK_emotions_articles.csv")
+UK_emotions_count = emotions_articles_prep(UK_emotions_articles, articles_UK_body)
+UK_emotions_count$year = as.numeric(UK_emotions_count$year)
+UK_emotions_graph = emotions_graph_countries(UK_emotions_count, 'Украина')
+ggsave('UK_emotions_graph.png', width = 10)
+UK_emotions_graph_line = emotions_graph_countries_line(UK_emotions_count, 'Украина')
+ggsave('UK_emotions_graph_line.png', width = 10)
+```
+
+## Общий график
+
+```{r message=FALSE, warning=FALSE}
+ggarrange(BL_emotions_graph, KZ_emotions_graph, RU_emotions_graph, TK_emotions_graph, UK_emotions_graph, common.legend = TRUE)
+ggsave('combined_emotions_graph.png', width = 10, height = 7)
+ggarrange(BL_emotions_graph_line, KZ_emotions_graph_line, RU_emotions_graph_line, TK_emotions_graph_line, UK_emotions_graph_line, common.legend = TRUE)
+ggsave('combined_emotions_graph_line.png', width = 11, height = 7)
+```
+
+## Частота отдельных эмоцций
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# функция для построения графика частоты встречаемости эмоции для каждой страны
+all_emotion_types = function(Country_emotions_articles, name){
+  Country_emotions_articles$emotion_type = as.factor(Country_emotions_articles$emotion_type)
+  data = Country_emotions_articles %>% filter(!str_detect(as.character(Country_emotions_articles$emotion_type), 'negated'))
+  data = data %>% select(emotion_type, emotion_count)
+  data = data %>% group_by(emotion_type) %>% summarise(sum_em = sum(emotion_count)) %>% mutate(sum_all = sum(sum_em))
+  graph = data %>% group_by(emotion_type) %>% mutate(share = (sum_em/sum_all)*100) %>% ggplot() +
+  geom_bar(mapping = aes(y = share, x = fct_reorder(emotion_type, desc(share)), fill = as.factor(emotion_type)), stat = 'identity', position = 'dodge') +
+  theme_classic(base_size = 12) +
+  labs(subtitle = name, x = "", y = "Процент  встречаемости эмоции") +
+  scale_fill_manual(values = values_cols_neg) + 
+  theme(legend.position = 'none', axis.text.x = element_text(size = 10)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 7))
+  return(graph)}
+
+# Туркменистан
+types_emotion_tk = all_emotion_types(TK_emotions_articles, 'Туркменистан')
+# Россия
+types_emotion_ru = all_emotion_types(RU_emotions_articles, 'Россия')
+# Украина
+types_emotion_uk = all_emotion_types(UK_emotions_articles, 'Украина')
+# Казахстан
+types_emotion_kz = all_emotion_types(KZ_emotions_articles, 'Казахстан')
+# Белоруссия
+types_emotion_bl = all_emotion_types(BL_emotions_articles, 'Белоруссия')
+
+# общий график по странам
+ggarrange(types_emotion_bl, types_emotion_kz, types_emotion_ru, types_emotion_tk, types_emotion_uk, common.legend = FALSE)
+ggsave('combined_types_emotion.png', width = 15, height = 8)
+```
+
+## Для регрессии
+
+```{r message=FALSE, warning=FALSE}
+# создание набора данных про эмоции для регрессии по каждой стране
+frequnecy_emotion_table = function(data, name){
+  data = data %>% group_by(year) %>% filter(year < 2021 & year > 1990) %>% summarise(Average_emotion = mean(emotion))
+  data$country = name
+  data$diff_emotion = c(0, diff(data$Average_emotion)) 
+  return(data)
+}
+
+BL_emotions_mean = frequnecy_emotion_table(BL_emotions_count,  'Belarus') 
+RU_emotions_mean = frequnecy_emotion_table(RU_emotions_count,  'Russia') 
+KZ_emotions_mean = frequnecy_emotion_table(KZ_emotions_count,  'Kazakhstan') 
+TK_emotions_mean = frequnecy_emotion_table(TK_emotions_count,  'Turkmenistan') 
+UK_emotions_mean = frequnecy_emotion_table(UK_emotions_count,  'Ukraine') 
+
+# создания набора данных для отдельных эмоций
+get_emotion_type = function(Country_emotions_count, Country_emotions_mean){
+  Country_emotions_count = Country_emotions_count %>% filter(year < 2021 & year > 1990)
+  anger = Country_emotions_count %>% filter(emotion_type ==  'anger') %>% group_by(year) %>% summarise(anger = mean(emotion))
+  anticipation = Country_emotions_count %>% filter(emotion_type ==  'anticipation') %>% group_by(year) %>% summarise(anticipation = mean(emotion))
+  disgust = Country_emotions_count %>% filter(emotion_type ==  'disgust') %>% group_by(year) %>% summarise(disgust = mean(emotion))
+  fear = Country_emotions_count %>% filter(emotion_type ==  'fear') %>% group_by(year) %>% summarise(fear = mean(emotion))
+  joy = Country_emotions_count %>% filter(emotion_type ==  'joy') %>% group_by(year) %>% summarise(joy = mean(emotion))
+  sadness = Country_emotions_count %>% filter(emotion_type ==  'sadness') %>% group_by(year) %>% summarise(sadness = mean(emotion))
+  surprise = Country_emotions_count %>% filter(emotion_type ==  'surprise') %>% group_by(year) %>% summarise(surprise = mean(emotion))
+  trust = Country_emotions_count %>% filter(emotion_type ==  'trust') %>% group_by(year) %>% summarise(trust = mean(emotion))
+  data = left_join(Country_emotions_mean, anger) %>% left_join(anticipation) %>% left_join(disgust) %>% left_join(fear) %>% left_join(joy) %>% left_join(sadness) %>% left_join(surprise) %>% left_join(trust) 
+return(data)}
+
+BL_emotions = get_emotion_type(BL_emotions_count, BL_emotions_mean)
+KZ_emotions = get_emotion_type(KZ_emotions_count, KZ_emotions_mean)
+RU_emotions = get_emotion_type(RU_emotions_count, RU_emotions_mean)
+TK_emotions = get_emotion_type(TK_emotions_count, TK_emotions_mean)
+UK_emotions = get_emotion_type(UK_emotions_count, UK_emotions_mean)
+```
+
+## Описательная статистика эмоций
+
+Подсчёт описательной статистики для всех стран.
+
+```{r}
+panel_data_emotions = BL_emotions %>% rbind(KZ_emotions, RU_emotions) %>% rbind(TK_emotions, UK_emotions)
+
+# вычисление описательной статистики для каждой страны
+decriptive_emotions = panel_data_emotions %>% group_by(country)  %>% summarise(Maximum = round(max(Average_emotion, na.rm = TRUE),3), Minimum = round(min(Average_emotion, na.rm = TRUE),3), Mean = round(mean(Average_emotion, na.rm = TRUE),3), Standard_Deviation = round(sd(Average_emotion, na.rm = TRUE),3)) 
+# сохранение датасета
+write.csv(decriptive_emotions, 'decriptive_emotions.csv')
+```
+
+## Плохие или хорошие эмоции
+
+```{r}
+# добавление колонки страны 
+TK_emotions_count$Country = 'Туркменистан'
+UK_emotions_count$Country = 'Украина'
+RU_emotions_count$Country = 'Россия'
+BL_emotions_count$Country = 'Белоруссия'
+KZ_emotions_count$Country = 'Казахстан'
+# приведение к нужному типу данных
+UK_emotions_count$year = as.numeric(UK_emotions_count$year)
+# создание общего набора данных по эмоциям
+emotions_articles_overall = TK_emotions_count %>% rbind(UK_emotions_count, RU_emotions_count) %>% rbind(BL_emotions_count, KZ_emotions_count) 
+emotions_articles_overall = emotions_articles_overall %>% filter(year > 1990 & year < 2021)
+# создание новой колонки отношения эмоции к одной из двух категорий
+emotions_articles_overall$good_or_bad = case_when(emotions_articles_overall$emotion_type == 'anger' ~ 'bad', 
+          emotions_articles_overall$emotion_type == 'anticipation' ~ 'good', 
+          emotions_articles_overall$emotion_type == 'disgust' ~ 'bad', 
+          emotions_articles_overall$emotion_type == 'fear' ~ 'bad', 
+          emotions_articles_overall$emotion_type == 'sadness' ~ 'bad',
+          emotions_articles_overall$emotion_type == 'trust' ~ 'good', 
+          emotions_articles_overall$emotion_type == 'surprise' ~ 'good', 
+          emotions_articles_overall$emotion_type == 'joy' ~ 'good')
+# кодировка категорий эмоций в бинарные переменные
+emotions_articles_overall$good_or_bad_numeric = case_when( emotions_articles_overall$good_or_bad == 'bad' ~ 0, emotions_articles_overall$good_or_bad == 'good' ~ 1)
+```
+
+### Столбчатая диаграмма доли плохих и хороших эмоций.
+
+```{r message=FALSE, warning=FALSE}
+goodorbad_graph = function(name){
+country_goodorbad = emotions_articles_overall %>% filter(Country == name) %>% group_by(year, good_or_bad) %>% summarise(mean = mean(emotion)) %>% ggplot() + 
+  geom_bar(mapping = aes(fill = good_or_bad, y = mean, x = year), stat = 'identity', position="fill") +
+  theme_classic(base_size = 14) +
+  labs(subtitle = name, x = "", y = "Доля эмоций") +
+  scale_fill_manual("Тип эмоции", values = c('bad' = '#D35400', 'good' = '#28B463')) + theme(legend.text = element_text(size=12), axis.text.x = element_text(size = 10, hjust = 1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 7)) 
+return(country_goodorbad)}
+
+BL_goodorbad = goodorbad_graph('Белоруссия')
+KZ_goodorbad = goodorbad_graph('Казахстан')
+RU_goodorbad = goodorbad_graph('Россия')
+UK_goodorbad = goodorbad_graph('Украина')
+TK_goodorbad = goodorbad_graph('Туркменистан')
+
+ggarrange(BL_goodorbad, KZ_goodorbad, RU_goodorbad, TK_goodorbad, UK_goodorbad, common.legend = TRUE,  legend="bottom")
+ggsave('combined_goodorbad_graph.png', width = 10, height = 7)
+```
+
+### Линейный график средней эмоциональности хороших эмоций.
+
+```{r message=FALSE, warning=FALSE}
+good_graph_line = function(name){
+  graph = emotions_articles_overall %>% filter(Country == name) %>%  group_by(year, good_or_bad) %>% summarise(sum = sum(emotion_count)) %>% group_by(year) %>% mutate(sum_all = sum(sum), share = sum/sum_all) %>% filter(good_or_bad == 'good') %>% ggplot(mapping = aes(y = share, x = year)) +
+  geom_line(size = 0.5, color = '#28B463') +
+  theme_classic(base_size = 14) +
+  labs(subtitle = name, x = "", y = "Доля эмоций") +
+  theme(axis.text.x = element_text(size = 10)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 7)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 5), trans = scales::pseudo_log_trans(base = 5)) 
+  return(graph)}
+
+BL_good_line = good_graph_line('Белоруссия')
+KZ_good_line = good_graph_line('Казахстан')
+RU_good_line = good_graph_line('Россия')
+UK_good_line = good_graph_line('Украина')
+TK_good_line = good_graph_line('Туркменистан')
+
+ggarrange(BL_good_line, KZ_good_line, RU_good_line, TK_good_line, UK_good_line, common.legend = TRUE,  legend="bottom")
+ggsave('combined_good_graph_line.png', width = 11, height = 7)
+```
+
+### Линейный график средней эмоциональности хороших и плохих эмоций.
+
+```{r}
+goodorbad_graph_line = function(name){
+  country_goodorbad_line = emotions_articles_overall %>% filter(Country == name) %>% group_by(year, good_or_bad) %>% summarise(mean = mean(emotion)) %>% ggplot(mapping = aes(color = good_or_bad, y = mean, x = year)) +
+  geom_line(size = 0.5) +
+  theme_classic(base_size = 14) +
+  labs(subtitle = name, x = "", y = "Количество эмоций") +
+  scale_color_manual("Характер эмоций", values = c('bad' = '#D35400', 'good' = '#28B463')) + theme(legend.text = element_text(size=12), axis.text.x = element_text(size = 10, hjust = 1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 7))
+  return(country_goodorbad_line)}
+
+BL_goodorbad_line = goodorbad_graph_line('Белоруссия')
+KZ_goodorbad_line = goodorbad_graph_line('Казахстан')
+RU_goodorbad_line = goodorbad_graph_line('Россия')
+UK_goodorbad_line = goodorbad_graph_line('Украина')
+TK_goodorbad_line = goodorbad_graph_line('Туркменистан')
+
+ggarrange(BL_goodorbad_line, KZ_goodorbad_line, RU_goodorbad_line, TK_goodorbad_line, UK_goodorbad_line, common.legend = TRUE,  legend="bottom")
+ggsave('combined_goodorbad_graph_line.png', width = 10, height = 7)
+```
+
+## Для регрессии
+
+```{r message=FALSE, warning=FALSE}
+# создание наборов данных для регрессии
+prop_good_emotion = function(name){
+  count_Country = emotions_articles_overall %>% filter(Country == name & !is.na(good_or_bad)) %>% group_by(year) %>% summarise(count_Country = sum(emotion_count)) 
+  Country_good = emotions_articles_overall %>% filter(Country == name & !is.na(good_or_bad)) %>% group_by(year, good_or_bad_numeric) %>% summarise(sum_Country = sum(emotion_count))  %>% left_join(count_Country) %>% mutate(prop_good_Country = sum_Country/count_Country*100, Country = name)
+   return(Country_good)} 
+
+KZ_good = prop_good_emotion('Казахстан')
+BL_good = prop_good_emotion('Белоруссия')
+RU_good = prop_good_emotion('Россия')
+TK_good = prop_good_emotion('Туркменистан')
+UK_good = prop_good_emotion('Украина')
+```
+
+### Линейный график доли хороших и плохих эмоций.
+
+```{r}
+country_good_line_share_graph = function(Country_good, name){
+  country_good_line_share = Country_good %>% group_by(year, good_or_bad_numeric) %>% filter(good_or_bad_numeric == 1) %>% ggplot(mapping = aes(y = prop_good_Country, x = year)) +
+  geom_line(size = 0.5, color = '#28B463') +
+  theme_classic(base_size = 14) +
+  labs(subtitle = name, x = "", y = "Доля положительных эмоций") + 
+    theme(axis.text.x = element_text(size = 10, hjust = 1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 7))
+  return(country_good_line_share)}
+
+BL_good_line_share = country_good_line_share_graph(BL_good, 'Белоруссия')
+KZ_good_line_share = country_good_line_share_graph(KZ_good, 'Казахстан')
+RU_good_line_share = country_good_line_share_graph(RU_good, 'Россия')
+UK_good_line_share = country_good_line_share_graph(UK_good, 'Украина')
+TK_good_line_share = country_good_line_share_graph(TK_good, 'Туркменистан')
+
+ggarrange(BL_good_line_share, KZ_good_line_share, RU_good_line_share, TK_good_line_share, UK_good_line_share, common.legend = TRUE,  legend="bottom")
+ggsave('combined_good_graph_line_share.png', width = 10, height = 7)
+```
+
+# Индекс рецессии 
+
+```{r}
+# подсчет упоминания слова "рецессия" в каждой статье
+articles_KZ_body$recession = str_count(articles_KZ_body$body, 'recession')
+articles_RU_body$recession = str_count(articles_RU_body$body, 'recession')
+articles_BL_body$recession = str_count(articles_BL_body$body, 'recession')
+articles_UK_body$recession = str_count(articles_UK_body$body, 'recession')
+articles_TK_body$recession = str_count(articles_TK_body$body, 'recession')
+
+# создание переменной квартала и подсчет упоминания слова "рецессия" в квартале
+get_quarter = function(articles_body){
+  articles_body$quarter  = as.factor(ifelse(month(articles_body$pub_date) %in% c("1", "2", "3"), 'Q1', ifelse(month(articles_body$pub_date) %in% c("4", "5", "6"), 'Q2', ifelse(month(articles_body$pub_date) %in% c("7", "8", "9"), 'Q3', 'Q4'))))
+  articles_body$year_quarter = as.yearqtr(ifelse(articles_body$quarter %in% 'Q1', paste(year(articles_body$pub_date), 'Q1', sep=' '), ifelse(articles_body$quarter %in% 'Q2', paste(year(articles_body$pub_date), 'Q2', sep=' '), ifelse(articles_body$quarter %in% 'Q3', paste(year(articles_body$pub_date), 'Q3', sep=' '), paste(year(articles_body$pub_date), 'Q4', sep=' ')))))
+  return(articles_body)}
+
+articles_KZ_body = get_quarter(articles_KZ_body)
+articles_RU_body = get_quarter(articles_RU_body)
+articles_BL_body = get_quarter(articles_BL_body)
+articles_UK_body = get_quarter(articles_UK_body)
+articles_TK_body = get_quarter(articles_TK_body)
+```
+
+## Графики рецессии в абсолютных и относительных значениях
+
+```{r message=FALSE, warning=FALSE}
+# график с шагом количества упоминания слова "рецессия"
+stepgraph_recession = function(articles_body, name){
+  graph_recession_country = articles_body %>% mutate(year = year(pub_date)) %>% filter(year > 1990 & year < 2021) %>% group_by(year_quarter) %>% summarise(sum = sum(recession, na.rm = TRUE)) %>%  ggplot(aes(x = year_quarter, y = sum)) + 
+  geom_step(direction = "mid", color = '#34495E') + 
+  theme_classic(base_size = 14) +
+  labs(subtitle = name, x = "", y = "Упоминание слова 'recession'") + theme(axis.text.x = element_text(size = 10, hjust = 1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 7)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) 
+  return(graph_recession_country)}
+
+ggarrange(stepgraph_recession(articles_BL_body, 'Белоруссия'), stepgraph_recession(articles_KZ_body, 'Казахстан'), stepgraph_recession(articles_RU_body, 'Россия'), stepgraph_recession(articles_TK_body, 'Туркменистан'), stepgraph_recession(articles_UK_body, 'Украина'))
+ggsave('combined_stepgraph_recession.png', width = 11, height = 7)
+
+# график с шагом процентов упоминаний слова "рецессия"
+recession_percent_graph_country = function(articles_body, name){
+  recession_count_Country = articles_body %>% mutate(year = year(pub_date)) %>% filter(year > 1990 & year < 2021) %>% summarise(sum = sum(recession, na.rm = TRUE))
+  recession_percent_graph = articles_body %>% mutate(year = year(pub_date)) %>% filter(year > 1990 & year < 2021) %>% group_by(year_quarter) %>% summarise(sum = sum(recession, na.rm = TRUE))  %>% mutate(all_recession = recession_count_Country$sum, prop_recession = sum/all_recession) %>%  ggplot(aes(x = year_quarter, y = prop_recession)) + geom_step() + 
+  theme_classic(base_size = 14) +
+  labs(subtitle = name, x = "Год", y = "Процент упоминаний слова 'recession'") + 
+  theme(axis.text.x = element_text(size = 10, hjust = 1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 7)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10), labels = scales::percent_format(accuracy = 1)) 
+return(recession_percent_graph)}
+
+ggarrange(recession_percent_graph_country(articles_BL_body, 'Белоруссия'), recession_percent_graph_country(articles_KZ_body, 'Казахстан'), recession_percent_graph_country(articles_RU_body, 'Россия'), recession_percent_graph_country(articles_TK_body, 'Туркменистан'), recession_percent_graph_country(articles_UK_body, 'Украина'))
+ggsave('combined_percent_recession.png', width = 11, height = 7)
+```
+
+## Совмещённый график индекса рецессии
+
+```{r message=FALSE, warning=FALSE}
+frecession_for_regression = function(articles_body){
+  recession = articles_body %>% mutate(year = year(pub_date)) %>% filter(year > 1990 & year < 2021) %>% select(Country, recession, year) %>% group_by(year, Country) %>% summarise(recession = sum(recession, na.rm = TRUE))
+return(recession)}
+tk_recession = frecession_for_regression(articles_TK_body)
+tk_recession = tk_recession %>% ungroup() %>% add_row(year = 1991, Country = 'Туркменистан', recession = 0) %>% group_by(year)
+tk_recession = tk_recession %>% arrange(year)
+bl_recession = frecession_for_regression(articles_BL_body)
+uk_recession = frecession_for_regression(articles_UK_body)
+kz_recession = frecession_for_regression(articles_KZ_body)
+ru_recession = frecession_for_regression(articles_RU_body)
+```
+
+# Инвестиции США в Россию
+
+```{r message=FALSE, warning=FALSE}
+usa_fdi_rus <- read_excel("usa_fdi_inrussia.xlsx", 
+    sheet = "Data")
+colnames(usa_fdi_rus) = c('year', 'FDI_USA')
+usa_fdi_rus = na.omit(usa_fdi_rus)
+usa_fdi_rus$year = as.numeric(usa_fdi_rus$year)
+
+usa_fdi_rus_graph = usa_fdi_rus %>%  ggplot(aes(x = year, y = FDI_USA)) + geom_line(size = 0.8, color = '#0E6655') + geom_point(color = '#0D5E4E') +
+  theme_classic(base_size = 14) +
+  labs(x = " ", y = "Прямые инвестиции (млрд. долл. США)") + 
+  theme(axis.text.x = element_text(size = 10, hjust = 1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 12)) + 
+  scale_y_continuous(trans = scales::pseudo_log_trans(base = 5), breaks = scales::pretty_breaks(n = 10))
+usa_fdi_rus_graph
+# сохранение графика в png-формате
+ggsave("usa_fdi_rus_graph.png", width = 10, height = 7)
+
+comdined_data = ru %>% filter(year > 1999) %>% mutate(FDI_bln = FDI/1000000000) %>% left_join(usa_fdi_rus)
+comdined_data = comdined_data %>% filter(year > 1999) %>% left_join(RU_ave_sent)
+
+comdined_data_graph = comdined_data %>%  ggplot() + geom_line(aes(x = year, y = FDI_USA, color = '#0E6655'), size = 0.8) + geom_line(aes(x = year, y = FDI_bln, color = 'tomato'), size = 0.8) + 
+  theme_classic(base_size = 14) +
+  labs(x = " ", y = "Прямые инвестиции (млрд. долл. США)") + 
+  theme(axis.text.x = element_text(size = 10, hjust = 1), legend.position = c(0.16, 0.85), legend.text = element_text(size=12)) +
+  scale_colour_manual(name = "Обозначения", 
+                      values = c('#0E6655','tomato'), 
+                      labels = c("Инвестиции США в Россию", "Общие инвестиции в Россию")) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 12)) + 
+  scale_y_continuous(trans = scales::pseudo_log_trans(base = 5), breaks = scales::pretty_breaks(n = 10))
+comdined_data_graph
+# сохранение графика в png-формате
+ggsave("comdined_data_graph.png", width = 10, height = 7)
+```
+
+## График с тональностью для инвестиций в США
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+par(mar = c(5, 4, 1.5, 4)) 
+plot(comdined_data$year, comdined_data$FDI_USA, type ="l", ylab = "ПИИ (100 млрд. долл.)", xlab = "", col = "#0E6655", lwd = 2, axis = FALSE)
+par(new = TRUE)
+plot(comdined_data$year, comdined_data$Average_sentiments, type = "l", xaxt = "n", yaxt = "n", ylab = "", xlab = "", col = "steelblue", lwd = 2)
+axis(side = 4)
+mtext("Средняя тональность", side = 4, line = 3)
+legend("bottom", inset = c(1, -0.3), horiz = TRUE, xpd = TRUE, c("Инвестиции США в Россию", "Средняя тональность"), col = c('#0E6655', "steelblue"), lty = c(1, 1),  bty = "n")
+
+par(mar = c(5, 4, 1.5, 4)) 
+plot(comdined_data$year, comdined_data$FDI_bln, type ="l", ylab = "ПИИ (100 млрд. долл.)", xlab = "", col = "tomato", lwd = 2, axis = FALSE)
+par(new = TRUE)
+plot(comdined_data$year, comdined_data$FDI_USA, type = "l", xaxt = "n", yaxt = "n", ylab = "", xlab = "", col = "steelblue", lwd = 2)
+axis(side = 4)
+mtext("Инвестиции США в Россию", side = 4, line = 3)
+legend("bottom", inset = c(1, -0.3), horiz = TRUE, xpd = TRUE, c("Общие инвестиции в Россию", "Инвестиции США в Россию"), col = c('tomato', "steelblue"), lty = c(1, 1),  bty = "n")
+```
+
+
+# Сбор данных для регрессии
+
+Сбор макроэкономических показателей и метрик, полученных с помощью текстового анализа, в один готовый датасет для будущих регрессий.
+
+```{r}
+# функция для сбора маленьких датасетов для разных факторов в один большой датасет для каждой страны
+for_regressions = function(Country_ave_sent, country_controls, country_recession, Country_good, Country_emotions, country_articles_actual){
+  Country_ave_sent1 = Country_ave_sent %>% select(-country)
+  country_controls$year = as.numeric(as.character(country_controls$year))
+  country_recession1 = country_recession %>% select(-Country)
+  country_good1 = Country_good %>% filter(good_or_bad_numeric == 1) %>% select(year, prop_good_Country)
+  Country_emotions = Country_emotions %>% select(-country)
+  country_regression = left_join(country_controls, Country_ave_sent1, by = 'year') %>% left_join(country_recession1, by = 'year') %>% left_join(Country_emotions, by = 'year') %>% left_join(country_good1, by = 'year') %>% left_join(country_articles_actual, by = 'year')
+  country_regression$FDI_ln = log(country_regression$FDI)
+  country_regression$FDI_growth = with(country_regression, ave(FDI, FUN=function(x) c(NA, diff(x)/x[-length(x)])))
+  return(country_regression)}
+
+# Россия
+ru_regression = for_regressions(RU_ave_sent, rus_controls, ru_recession, RU_good, RU_emotions, rus_articles_actual)
+# Казахстан
+kz_regression = for_regressions(KZ_ave_sent, kaz_controls, kz_recession, KZ_good, KZ_emotions, kz_articles_actual)
+# Украина
+# приведение данных к нужному типу, чтобы не возникло ошибок при объединении датасетов
+ukr_controls$year = as.numeric(as.character(ukr_controls$year))
+UK_emotions$year = as.numeric(UK_emotions$year)
+uk_regression = for_regressions(UK_ave_sent, ukr_controls, uk_recession, UK_good, UK_emotions, ukr_articles_actual)
+# Белоруссия
+bl_regression = for_regressions(BL_ave_sent, blr_controls, bl_recession, BL_good, BL_emotions, blr_articles_actual)
+# Туркменистан
+tk_regression = for_regressions(TK_ave_sent, tkm_controls, tk_recession, TK_good, TK_emotions, trk_articles_actual)
+
+# переименование колонок к единому названию
+names(ru_regression)[names(ru_regression) == 'Russia'] <- 'Count_articles'
+names(kz_regression)[names(kz_regression) == 'Kazakhstan'] <- 'Count_articles'
+names(uk_regression)[names(uk_regression) == 'Ukraine'] <- 'Count_articles'
+names(bl_regression)[names(bl_regression) == 'Belarus'] <- 'Count_articles'
+names(tk_regression)[names(tk_regression) == 'Turkmenistan'] <- 'Count_articles'
+
+# объединение маленьких датасетов по каждой стране в один большой набор данных 
+data_for_panel_regression = kz_regression  %>% rbind(ru_regression, uk_regression) %>% rbind(bl_regression, tk_regression)
+
+# создание переменной доли количества статей
+data_for_panel_regression = data_for_panel_regression %>% group_by(Country) %>% mutate(sum_articles = sum(Count_articles, na.rm = TRUE), share_articles = Count_articles/sum_articles*100)
+# создание переменной доли индекса рецессии
+data_for_panel_regression = data_for_panel_regression %>% group_by(Country) %>% mutate(sum_recession = sum(recession, na.rm = TRUE), share_recession = recession/sum_recession*100)
+
+# создание второго набора данных для 1992-2019 гг.
+data_for_panel_regression9219 = data_for_panel_regression %>% filter(year > 1991 & year < 2020)
+
+# конвертация простых датафреймов в формат датафреймов для панельных данных
+panel_data = pdata.frame(data_for_panel_regression, index = c("Country", "year"), row.names = TRUE)
+panel_data9219 = pdata.frame(data_for_panel_regression9219, index = c("Country", "year"), row.names = TRUE)
+```
+
+## График панельный сентиментов и инвестиций (псевдологарифмированный)
+
+```{r message=FALSE, warning=FALSE}
+# функция для построение графика для каждой страны
+panel_plot = function(data, name1, name2){
+  fdi_bln = data_for_panel_regression %>% filter(Country == name1)
+  par(mar = c(4.2, 4, 1.7, 4)) 
+  plot(fdi_bln$year, fdi_bln$FDI/1000000000, type ="l", ylab = "ПИИ (100 млрд. долл.)",
+       main = name2, xlab = "",
+       col = "#45B39D", lwd = 2, axis = FALSE, font.main = 1.5)
+  par(new = TRUE)
+  plot(fdi_bln$year, fdi_bln$Average_sentiments, type = "l", xaxt = "n", yaxt = "n",
+       ylab = "", xlab = "", col = "#E67E22", lwd = 2)
+  axis(side = 4)
+  mtext("Средняя тональность", side = 4, line = 3)}
+
+#  Россия
+panel_plot(data_for_panel_regression, 'Russia', 'Россия')
+# Казахстан
+panel_plot(data_for_panel_regression, 'Kazakhstan', 'Казахстан')
+# Белоруссия
+panel_plot(data_for_panel_regression, 'Belarus', 'Белоруссия')
+# Туркменистан
+panel_plot(data_for_panel_regression, 'Turkmenistan', 'Туркменистан')
+# Украина
+panel_plot(data_for_panel_regression, 'Ukraine', 'Украина')
+legend("bottom", inset = c(1, -0.3), xpd = TRUE, horiz = TRUE, c("Прямые иностранные инвестиции", "Средняя тональность"), col = c("#45B39D", "#E67E22"), lty = c(1, 1),  bty = "n")
+```
+
+# Корреляция  
+
+```{r}
+# подсчёт корреляции для потенциальных регрессоров в моделях
+data_cor = panel_data %>% ungroup() %>% select(FDI, GDP_growth_percapita, Inflation, Unemployment, Average_sentiments, Average_emotion, prop_good_Country, share_articles, growth_articles, share_recession) %>% as.matrix() %>% cor(use = "pairwise.complete.obs", method = "pearson") %>% data.frame()
+data_cor = round(data_cor,2)
+names = c('ПИИ', 'ВВП на душу населения', "Инфляция", "Безработица", "Тональность", "Эмоциональность", "Доля положительных эмоций", "Доля количества статей", "Прирост статей", "Доля индекса рецессии")
+colnames(data_cor) = names
+rownames(data_cor) = names
+upper = data_cor
+upper[upper.tri(data_cor, diag = TRUE)] = ""
+upper = as.data.frame(upper)
+print(xtable(upper), type="html", file = "correlation.csv")
+
+# подсчёт корреляции доли инвестиций от ВВП с использованием конкретных эмоций
+data_cor2 = panel_data %>% ungroup() %>% select(FDI, anger, disgust, fear, sadness, trust) %>% as.matrix() %>% cor(use = "pairwise.complete.obs", method = "pearson") %>% data.frame()
+data_cor2 = round(data_cor2,2)
+names2 = c('ПИИ', "Anger", "Disgust", "Fear", "Sadness", "Trust")
+colnames(data_cor2) = names2
+rownames(data_cor2) = names2
+upper2 = data_cor2
+upper2[upper.tri(data_cor2, diag = TRUE)] = ""
+upper2 = as.data.frame(upper2)
+print(xtable(upper2), type="html", file = "correlation2.csv")
+```
+
+# Модели регрессий
+
+```{r}
+# функции для подсчитывания метрик качества моделей
+RMSE = function(error){sqrt(mean(error^2))}
+MAE = function(error){mean(abs(error))}
+RSS = function(model){sum(resid(model)^2)}
+
+# удаление выброса с отрицательным значением
+panel_data_naomit = data_for_panel_regression9219 %>% filter(FDI > 0)
+# hist(log(panel_data_naomit$FDI))
+# hist(log(panel_data_naomit$share_articles))
+```
+
+## **Зависимая переменная** - доля инвестиций от ВВП. 
+
+### Pooled Model 
+
+В первую очередь строится короткая базовая регрессия.
+
+#### Набор данных за 1991-2020 гг.
+
+!Базовая регрессия: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + средняя эмоциональность
+
+```{r message=FALSE, warning=FALSE}
+pooling = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + Average_emotion, data = panel_data, model = "pooling")
+summary(pooling) # значимы: рост ВВП, средние сентименты, средняя эмоциональность, Adj. R-Squared: 0.27812
+vif(pooling) # нет мультиколлинеарности
+
+data.frame(residuals(pooling)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling.)) #  
+
+# cluster robust standard errors - heteroskedasticity consistent coefficients
+tbl <- tidy(coeftest(pooling, vcov=vcovHC(pooling, type="HC0",cluster="group"))) # значимы: рост ВВП, средние сентименты, средняя эмоциональность
+```
+
+-Базовая регрессия: рост ВВП + инфляция + безработица + прирост статей + средняя тональность + средняя эмоциональность
+
+```{r message=FALSE, warning=FALSE}
+pooling2 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + growth_articles + Average_sentiments + Average_emotion, data = panel_data, model = "pooling")
+summary(pooling2) # значимы: рост ВВП, менее значимы:ы средние сентименты, средняя эмоциональность, Adj. R-Squared: 0.27586
+vif(pooling2) # нет мультиколлинеарности
+
+data.frame(residuals(pooling2)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling2.)) #  
+
+# cluster robust standard errors - heteroskedasticity consistent coefficients
+tbl <- tidy(coeftest(pooling2, vcov=vcovHC(pooling2, type="HC0",cluster="group"))) # значимы: рост ВВП, менее значимы:ы средние сентименты, средняя эмоциональность
+```
+
+-Базовая регрессия: рост ВВП + инфляция + безработица + доля количества статей + прирост тональности + прирост эмоциональности
+
+```{r message=FALSE, warning=FALSE}
+pooling3 <- plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + diff_sentiment + diff_emotion, data = panel_data, model = "pooling")
+summary(pooling3) # значимы: рост ВВП, безработица, Adj. R-Squared: 0.16211
+vif(pooling3) # нет мультиколлинеарности
+
+data.frame(residuals(pooling3)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling3.)) #  
+
+# cluster robust standard errors - heteroskedasticity consistent coefficients
+tbl3 <- tidy(coeftest(pooling3, vcov=vcovHC(pooling, type="HC0",cluster="group"))) # значимы: рост ВВП
+```
+
+!Длинная регрессия: рост ВВП + инфляция + доля количества статей + тональность + эмоциональность + доля индекса рецессии + плохие/хорошие эмоции 
+ 
+```{r}
+pooling4 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + Average_emotion + share_recession + prop_good_Country, data = panel_data, model = "pooling")
+summary(pooling4) # значимы: рост ВВП+, средняя тональность-, средняя эмоциональность-, доля хороших эмоций-,  Adj. R-Squared: 0.28303
+vif(pooling4) # нет мультиколлинеарности
+
+data.frame(residuals(pooling4)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling4.)) #  
+
+tbl4 <- tidy(coeftest(pooling4, vcov=vcovHC(pooling4, type="HC0", cluster="group"))) # значимы: рост ВВП, средняя тональность, средняя эмоциональность, доля хороших эмоций
+```
+
+-Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + anger + fear + disgust + joy + sadness + surprise + trust
+ 
+```{r}
+pooling6 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + anger + fear + disgust + joy + sadness + surprise + trust, data = panel_data, model = "pooling")
+summary(pooling6) # значимы: рост ВВП, fear, disgust, sadness, trust,  Adj. R-Squared: 0.32742
+vif(pooling6) # мультиколлинеарность
+```
+
+!Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + trust
+ 
+```{r}
+pooling7 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + trust, data = panel_data, model = "pooling")
+summary(pooling7) # значимы: рост ВВП+, trust-,  средняя тональность-, Adj. R-Squared: 0.28714
+vif(pooling7)  # нет мультиколлинеарности
+```
+
+!Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + fear
+ 
+```{r}
+pooling9 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + fear, data = panel_data, model = "pooling")
+summary(pooling9) # значимы: рост ВВП+, fear-,  средняя тональность-, Adj. R-Squared: 0.26469
+vif(pooling9) # нет мультиколлинеарности
+```
+
+!Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + anger
+ 
+```{r}
+pooling11 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + anger, data = panel_data, model = "pooling")
+summary(pooling11) # значимы: рост ВВП+, anger-,  средняя тональность-, Adj. R-Squared: 0.27599
+vif(pooling11) # нет мультиколлинеарности
+```
+
+!Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + sadness
+
+```{r}
+pooling13 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + sadness, data = panel_data, model = "pooling")
+summary(pooling13) # значимы: рост ВВП+, sadness-,  средняя тональность-, Adj. R-Squared: 0.27742
+vif(pooling13) # нет мультиколлинеарности
+```
+
+!Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + disgust
+
+```{r}
+pooling15 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + disgust, data = panel_data, model = "pooling")
+summary(pooling15) # значимы: рост ВВП+, disgust-,  средняя тональность-, Adj. R-Squared: 0.27008
+vif(pooling15) # нет мультиколлинеарности
+```
+
+Лучшие модели для 1991-2020:
+
+Базовая регрессия, pooling: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + средняя эмоциональность > Adj. R-Squared: 0.27812
+Длинная регрессия, pooling4: рост ВВП + инфляция + доля количества статей + тональность + эмоциональность + доля индекса рецессии + плохие/хорошие эмоции > Adj. R-Squared: 0.28303
+
+Отдельные эмоции в регрессии, pooling7: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + trust > Adj. R-Squared: 0.28714
+Отдельные эмоции в регрессии, pooling9: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + fear > Adj. R-Squared: 0.26469
+Отдельные эмоции в регрессии, pooling11: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + anger > Adj. R-Squared: 0.27599
+Отдельные эмоции в регрессии, pooling13: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + sadness > Adj. R-Squared: 0.27742
+Отдельные эмоции в регрессии, pooling15: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + disgust > Adj. R-Squared: 0.27008
+
+Примечательны выбивающиеся значения для выборки 1991-2020 года, поэтому рассматривается также выборка для 1992-2019 гг..
+
+
+#### Набор данных за 1992-2019 гг.
+
+!Базовая регрессия: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + средняя эмоциональность
+
+```{r message=FALSE, warning=FALSE}
+pooling_1 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + Average_emotion, data = panel_data9219, model = "pooling")
+summary(pooling_1) # значимы: рост ВВП, средние сентименты, средняя эмоциональность, Adj. R-Squared: 0.29716
+vif(pooling_1) # нет мультиколлинеарности
+data.frame(residuals(pooling_1)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling_1.)) #  
+# cluster robust standard errors - heteroskedasticity consistent coefficients
+tbl_1 <- tidy(coeftest(pooling_1, vcov=vcovHC(pooling_1, type="HC0",cluster="group"))) # значимы: рост ВВП, средние сентименты, средняя эмоциональность
+```
+
+-Базовая регрессия: рост ВВП + инфляция + безработица + прирост статей + средняя тональность + средняя эмоциональность
+
+```{r message=FALSE, warning=FALSE}
+pooling2_1 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + growth_articles + Average_sentiments + Average_emotion, data = panel_data9219, model = "pooling")
+summary(pooling2_1) # значимы: рост ВВП+, средние сентименты-, средняя эмоциональность-, Adj. R-Squared: 0.29796
+vif(pooling2_1) # нет мультиколлинеарности
+data.frame(residuals(pooling2_1)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling2_1.)) #  
+# cluster robust standard errors - heteroskedasticity consistent coefficients
+tbl2_1 <- tidy(coeftest(pooling2_1, vcov=vcovHC(pooling2_1, type="HC0",cluster="group"))) # значимы: рост ВВП, средние сентименты, средняя эмоциональность
+```
+
+-Базовая регрессия: рост ВВП + инфляция + безработица + доля количества статей + прирост тональности + прирост эмоциональности
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+pooling3_1 <- plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + diff_sentiment + diff_emotion, data = panel_data9219, model = "pooling")
+summary(pooling3_1) # значимы: рост ВВП+, безработица-, Adj. R-Squared: 0.15897
+vif(pooling3_1) # нет мультиколлинеарности
+data.frame(residuals(pooling3_1)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling3_1.)) #  
+# cluster robust standard errors - heteroskedasticity consistent coefficients
+tbl3_1 <- tidy(coeftest(pooling3_1, vcov=vcovHC(pooling, type="HC0",cluster="group"))) # значимы: рост ВВП
+```
+
+!Длинная регрессия: рост ВВП + инфляция + доля количества статей + тональность + эмоциональность + доля индекса рецессии + плохие/хорошие эмоции 
+ 
+```{r}
+pooling4_1 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + log(share_articles) + Average_sentiments + Average_emotion + share_recession + prop_good_Country, data = panel_data9219, model = "pooling")
+summary(pooling4_1) # значимы: рост ВВП+, средняя тональность-, средняя эмоциональность-, доля хороших эмоций-,  Adj. R-Squared: 0.30433
+vif(pooling4_1) # нет мультиколлинеарности
+data.frame(residuals(pooling4_1)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling4_1.)) #  
+tbl4_1 <- tidy(coeftest(pooling4_1, vcov=vcovHC(pooling4_1, type="HC0", cluster="group"))) # значимы: рост ВВП, средняя тональность, средняя эмоциональность, доля хороших эмоций
+```
+
+-Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + anger + fear + disgust + joy + sadness + surprise + trust
+ 
+```{r}
+pooling6_1 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + anger + fear + disgust + joy + sadness + surprise + trust, data = panel_data9219, model = "pooling")
+summary(pooling6_1) # значимы: рост ВВП, fear, disgust, sadness, trust,  Adj. R-Squared: 0.33905
+vif(pooling6_1) # мультиколлинеарность
+```
+
+!Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + trust
+ 
+```{r}
+pooling7_1 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + trust, data = panel_data9219, model = "pooling")
+summary(pooling7_1) # значимы: рост ВВП+, trust-,  средняя тональность-, Adj. R-Squared: 0.30697
+vif(pooling7_1)  # нет мультиколлинеарности
+```
+
+!Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + fear
+ 
+```{r}
+pooling9_1 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + fear, data = panel_data9219, model = "pooling")
+summary(pooling9_1) # значимы: рост ВВП+, fear-,  средняя тональность-, Adj. R-Squared: 0.28214
+vif(pooling9_1) # нет мультиколлинеарности
+```
+
+!Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + anger
+
+```{r}
+pooling11_1 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + anger, data = panel_data9219, model = "pooling")
+summary(pooling11_1) # значимы: рост ВВП+, anger-,  средняя тональность-, Adj. R-Squared: 0.29535
+vif(pooling11_1) # нет мультиколлинеарности
+```
+
+!Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + sadness
+
+```{r}
+pooling13_1 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + sadness, data = panel_data9219, model = "pooling")
+summary(pooling13_1) # значимы: рост ВВП+, sadness-,  средняя тональность-, Adj. R-Squared: 0.29614
+vif(pooling13_1) # нет мультиколлинеарности
+```
+
+!Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + disgust
+
+```{r}
+pooling15_1 = plm(FDI_share_GDP ~ GDP_growth + Inflation + Unemployment + share_articles + Average_sentiments + disgust, data = panel_data9219, model = "pooling")
+summary(pooling15_1) # значимы: рост ВВП+, disgust-,  средняя тональность-, Adj. R-Squared: 0.28786
+vif(pooling15_1) # нет мультиколлинеарности
+```
+
+Лучшие модели для 1992-2019: 
+
+Базовая регрессия, pooling_1: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + средняя эмоциональность > Adj. R-Squared: 0.29716
+Длинная регрессия, pooling4_1: рост ВВП + инфляция + доля количества статей + тональность + эмоциональность + доля индекса рецессии + плохие/хорошие эмоции > Adj. R-Squared: 0.30433
+
+Отдельные эмоции в регрессии, pooling7_1: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + trust > Adj. R-Squared: 0.30697
+Отдельные эмоции в регрессии, pooling9_1: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + fear > Adj. R-Squared: 0.28214
+Отдельные эмоции в регрессии, pooling11_1: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + anger > Adj. R-Squared: 0.29535
+Отдельные эмоции в регрессии, pooling13_1: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + sadness > Adj. R-Squared: 0.29614
+Отдельные эмоции в регрессии, pooling15_1: рост ВВП + инфляция + безработица + доля количества статей + средняя тональность + disgust > Adj. R-Squared: 0.28786
+
+Все модели лучше при урезании года.  
+
+Модели с эмоциями можно отдельно вынести в отдельную табличку (у всех эмоций, к тому же, отрицательный знак). Тогда остается сравнить модель базовой (pooling_1) и длинной регрессии (pooling4_1).
+
+###### Сравнение моделей Pooled OLS: метрики качества
+
+```{r}
+RSS(pooling_1) # 1242.156
+RSS(pooling4_1) # 1210.868
+RSS(pooling7_1) # 1224.828
+RSS(pooling9_1) # 1268.709
+RSS(pooling11_1) # 1245.353
+RSS(pooling13_1) # 1243.966
+RSS(pooling15_1) # 1258.596
+
+RMSE(pooling_1$residuals) # 2.989377
+RMSE(pooling4_1$residuals) # 2.951488
+RMSE(pooling7_1$residuals) # 2.968453
+RMSE(pooling9_1$residuals) # 3.021159
+RMSE(pooling11_1$residuals) # 2.993221
+RMSE(pooling13_1$residuals) # 2.991554
+RMSE(pooling15_1$residuals) # 3.009094
+
+MAE(pooling_1$residuals) # 2.151284
+MAE(pooling4_1$residuals) # 2.148702
+MAE(pooling7_1$residuals) # 2.151424
+MAE(pooling9_1$residuals) # 2.163303
+MAE(pooling11_1$residuals) # 2.155403
+MAE(pooling13_1$residuals) # 2.146667
+MAE(pooling15_1$residuals) # 2.163339
+```
+
+Наименьшие ошибки наблюдаются у длинной регрессии. Проведем тесты на линейный ограничения для сравнения базовой и длинной регрессий.
+
+```{r}
+xtable(linearHypothesis(pooling4_1, c("prop_good_Country", "share_recession"),  vcov=vcovHC(pooling4_1, type="HC0",cluster="group"))) # отвергаемся нулевая гипотеза -> коэффициенты значимы -> длинная модель регрессии
+```
+
+Выбираем длинную модель сквозной регрессии.
+
+Соберём в латех модели для отдельных эмоций, используя робастные кластерные ошибки.
+
+```{r message=FALSE, warning=FALSE}
+stargazer(coeftest(pooling7_1, vcov=vcovHC(pooling7_1, type="HC0",cluster="group")), 
+          coeftest(pooling9_1, vcov=vcovHC(pooling9_1, type="HC0",cluster="group")), 
+          coeftest(pooling11_1, vcov=vcovHC(pooling11_1, type="HC0",cluster="group")), 
+          coeftest(pooling13_1, vcov=vcovHC(pooling13_1, type="HC0",cluster="group")), 
+          coeftest(pooling15_1, vcov=vcovHC(pooling15_1, type="HC0",cluster="group")),
+          title="Результаты сквозных регрессий с использованием конкретных эмоций", 
+          label="tab:reg_emotion", 
+          dep.var.labels='Доля ПИИ от ВВП', 
+          covariate.labels=c("Рост ВВП","Инфляция", "Безработица","Доля количества статей","Средняя тональность","Trust", "Fear", "Anger", "Sadness", "Disgust", "Constant"),
+          align=TRUE, no.space=TRUE, 
+          column.sep.width = "-10pt", 
+          df = FALSE,
+          decimal.mark = ',', 
+          column.labels=c("Pooled OLS (trust)", "Pooled OLS (fear)", "Pooled OLS (anger)", "Pooled OLS (sadness)", "Pooled OLS (disgust)"))
+
+stargazer(pooling7_1, 
+         pooling9_1, 
+          pooling11_1, 
+          pooling13_1, 
+          pooling15_1,
+          title="Результаты сквозных регрессий с использованием конкретных эмоций", 
+          dep.var.labels='Доля ПИИ от ВВП', 
+          align=TRUE, no.space=TRUE, column.sep.width = "-10pt", decimal.mark = ',', 
+          column.labels=c("Pooled OLS (trust)", "Pooled OLS (fear)", "Pooled OLS (anger)", "Pooled OLS (sadness)", "Pooled OLS (disgust)"))
+```
+
+
+### Fixed-Effects
+
+```{r}
+fixed <- plm(FDI_share_GDP ~ lag(FDI_share_GDP) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_emotion, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') ) # значимы: лаг инвестиций+, 1 лаг роста ВВП+, 1 лаг рецессии-, 1 лаг доля количества статей+, Adj. R-Squared: 0.01513
+summary(fixed)
+check_autocorrelation(fixed)
+coeftest(fixed, vcov=vcovHC(fixed, type="HC0", cluster="group")) # значимы:ы инвестиций, доля количества статей
+
+# метрики качества модели
+RSS(fixed)
+RMSE(fixed$residuals)
+MAE(fixed$residuals)
+```
+
+Anger
+
+```{r}
+fixed_anger <- plm(FDI_share_GDP ~ lag(FDI_share_GDP, 1) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2) + lag(anger, 1), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') )
+summary(fixed_anger)
+check_autocorrelation(fixed_anger)
+coeftest(fixed_anger, vcov=vcovHC(fixed_anger, type="HC0", cluster="group"))
+```
+
+Sadness
+
+```{r}
+fixed_sadness <- plm(FDI_share_GDP ~ lag(FDI_share_GDP, 1) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2) + lag(sadness, 1), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') )
+summary(fixed_sadness)
+check_autocorrelation(fixed_sadness)
+coeftest(fixed_sadness, vcov=vcovHC(fixed_sadness, type="HC0", cluster="group"))
+```
+
+Fear
+
+```{r}
+fixed_fear <- plm(FDI_share_GDP ~ lag(FDI_share_GDP, 1) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2) + lag(fear, 1), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') )
+summary(fixed_fear)
+check_autocorrelation(fixed_fear)
+coeftest(fixed_fear, vcov=vcovHC(fixed_fear, type="HC0", cluster="group"))
+```
+
+Disgust
+
+```{r}
+fixed_disgust <- plm(FDI_share_GDP ~ lag(FDI_share_GDP, 1) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2) + lag(disgust, 1), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') )
+summary(fixed_disgust)
+check_autocorrelation(fixed_disgust)
+coeftest(fixed_disgust, vcov=vcovHC(fixed_disgust, type="HC0", cluster="group"))
+```
+
+Trust
+
+```{r}
+fixed_trust <- plm(FDI_share_GDP ~ lag(FDI_share_GDP, 1) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2) + lag(trust, 1), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') )
+summary(fixed_trust)
+check_autocorrelation(fixed_trust)
+coeftest(fixed_trust, vcov=vcovHC(fixed_trust, type="HC0", cluster="group"))
+```
+
+Соберём в латех модели для отдельных эмоций, используя робастные кластерные ошибки.
+
+```{r message=FALSE, warning=FALSE}
+stargazer(coeftest(fixed_trust, vcov=vcovHC(fixed_trust, type="HC0",cluster="group")), 
+          coeftest(fixed_fear, vcov=vcovHC(fixed_fear, type="HC0",cluster="group")), 
+          coeftest(fixed_anger, vcov=vcovHC(fixed_anger, type="HC0",cluster="group")), 
+          coeftest(fixed_sadness, vcov=vcovHC(fixed_sadness, type="HC0",cluster="group")), 
+          coeftest(fixed_disgust, vcov=vcovHC(fixed_disgust, type="HC0",cluster="group")),
+          title="Результаты моделей с фиксированными эффектами с использованием конкретных эмоций", 
+          label="tab:reg_emotion_fixed", 
+          dep.var.labels='Доля ПИИ от ВВП', 
+          #covariate.labels=c("Рост ВВП","Инфляция", "Безработица","Доля количества статей","Средняя тональность","Trust", "Fear", "Anger", "Sadness", "Disgust", "Constant"),
+          align=TRUE, no.space=TRUE, 
+          column.sep.width = "-10pt", 
+          df = FALSE,
+          decimal.mark = ',', 
+          column.labels=c("Fixed-Effects (trust)", "Fixed-Effects (fear)", "Fixed-Effects (anger)", "Fixed-Effects (sadness)", "Fixed-Effects (disgust)"))
+
+stargazer(fixed_trust, 
+         fixed_fear, 
+          fixed_anger, 
+          fixed_sadness, 
+          fixed_disgust,
+          title="Результаты моделей с фиксированными эффектами с использованием конкретных эмоций", 
+          dep.var.labels='Доля ПИИ от ВВП', 
+          align=TRUE, no.space=TRUE, column.sep.width = "-10pt", decimal.mark = ',', 
+          column.labels=c("Fixed-Effects (trust)", "Fixed-Effects (fear)", "Fixed-Effects (anger)", "Fixed-Effects (sadness)", "Fixed-Effects (disgust)"))
+```
+
+Сравнение сквозной регрессии и регрессии с фиксированными эффектами.
+
+```{r}
+pFtest(fixed, pooling4_1) # p-value = 0.000000002291
+```
+
+Результаты в пользу модели с фиксированными эффектами.
+
+### First-Difference
+
+!Базовая регрессия, fd: lag(FDI_share_GDP) + lag(Unemployment, 1) + lag(GDP_growth, 1) + lag(Inflation, 1) + Average_emotion + Average_sentiments + share_articles
+
+```{r}
+fd <- plm(FDI_share_GDP ~ lag(FDI_share_GDP) + lag(Unemployment, 1) + lag(GDP_growth, 1) + lag(Inflation, 1) + Average_emotion + Average_sentiments + share_articles - 1, data = data_for_panel_regression9219, model = "fd", effects = 'twoways', index = c('Country', 'year')) # значимы: 1 лаг инвестиций+, тональность-, доля количества статей-
+summary(fd) # Adj. R-Squared: 0.14734
+coeftest(fd, vcov=vcovHC(fd, type="HC0", cluster="group")) # значимы:ы инвестиций, доля количества статей
+
+# метрики качества модели
+RSS(fd)
+RMSE(fd$residuals)
+MAE(fd$residuals)
+```
+
+!Длинная регрессия, fd6: lag(FDI_share_GDP) + lag(Unemployment, 1) + lag(GDP_growth, 1) + lag(Inflation, 1) + Average_sentiments + Average_emotion + share_articles + prop_good_Country + share_recession
+
+```{r message=FALSE, warning=FALSE}
+fd6 <- plm(FDI_share_GDP ~ lag(FDI_share_GDP) + lag(Unemployment, 1) + lag(GDP_growth, 1) + lag(Inflation, 1) + Average_sentiments + Average_emotion + share_articles + prop_good_Country + share_recession - 1, data = data_for_panel_regression9219, model = "fd", index = c('Country', 'year')) # значимы: 1 лаг инвестиций+, доля эмоций-
+summary(fd6) # Adj. R-Squared: 0.14851
+coeftest(fd6, vcov=vcovHC(fd6, type="HC0", cluster="group")) # значимы:ы лаги инвестиций, доля количества статей, доля рецессии
+
+# метрики качества модели
+RSS(fd6)
+RMSE(fd6$residuals)
+MAE(fd6$residuals)
+```
+
+Тест на линейные ограничения.
+
+```{r}
+xtable(linearHypothesis(fd6, c("prop_good_Country", "share_recession"),  vcov=vcovHC(fd6, type="HC0",cluster="group"))) # отвергаемся нулевая гипотеза -> коэффициенты значимы
+```
+
+Соберём в латех модели сквозных регрессий, с фиксированными эффектами и первыми разницами.
+
+```{r message=FALSE, warning=FALSE}
+stargazer(coeftest(pooling_1, vcov=vcovHC(pooling_1, type="HC0",cluster="group")), 
+          coeftest(pooling4_1, vcov=vcovHC(pooling4_1, type="HC0",cluster="group")), 
+          coeftest(fixed, vcov=vcovHC(fixed, type="HC0", cluster="group")),
+          coeftest(fd, vcov=vcovHC(fd, type="HC0", cluster="group")),
+          coeftest(fd6, vcov=vcovHC(fd6, type="HC0", cluster="group")), 
+          title="Результаты регрессий", 
+          label="tab:regressions", 
+          dep.var.labels='Доля ПИИ от ВВП', 
+          #covariate.labels=c("Рост ВВП","Инфляция", "Безработица", "Доля количества статей", "Средняя тональность", "Средняя эмоциональность", "Доля индекса рецессии", "Доля положительных эмоций", "Лаг ПИИ от ВВП", "Лаг Безработица", "1 Лаг рост ВВП", "2 Лаг рост ВВП", "Лаг рост ВВП", "Лаг Инфляция", "Лаг  Средняя эмоциональность", "Лаг Средняя тональность", "Лаг Доля количества статей", "1 Лаг Доля количества статей", "2 Лаг Доля количества статей", "Constant"),
+          align=TRUE, no.space=TRUE, 
+          column.sep.width = "-10pt", 
+          df = FALSE,
+          decimal.mark = ',', 
+          column.labels=c("Pooled OLS (rest.)", "Pooled OLS (unrest.)", "Fixed-effects", "First-Difference", "First-Difference"))
+
+stargazer(pooling_1, 
+          pooling4_1, 
+          fixed,
+          fd,
+          fd6, 
+          title="Результаты регрессий", 
+          dep.var.labels='Доля ПИИ от ВВП', 
+          align=TRUE, no.space=TRUE, 
+          column.sep.width = "-10pt", 
+          decimal.mark = ',', 
+          column.labels=c("Pooled OLS (rest.)", "Pooled OLS (unrest.)", "Fixed-effects", "First-Difference (rest.)", "First-Difference (unrest.)"))
+```
+
+Сравнение модели с фиксированными эффектми и с первыми разностями.
+
+```{r}
+pFtest(fixed, fd6) # 0.000003475
+```
+
+
+
+
+## **Зависимая переменная** - логарифм ПИИ. 
+
+```{r message=FALSE, warning=FALSE}
+plotmeans(FDI/1000000 ~ Country, 
+          main="Гетерогенность среди стран", 
+          data=panel_data_naomit, 
+          ylab = 'FDI (million US dollars)', 
+          p = 0.95,  
+          ylim = c(0,30000))
+plotmeans(FDI/1000000 ~ year, 
+          main="Гетерогенность среди временного периода", 
+          data=panel_data_naomit, 
+          ylab = 'FDI (million US dollars)', 
+          p = 0.95)
+# car::leveneTest(panel_data_naomit$FDI ~ panel_data_naomit$Country)
+```
+
+### Pooled OLS
+
+#### Набор данных за 1992-2019 гг.
+
+Базовая регрессия: рост ВВП + инфляция + безработица + логарифм доли количества статей + средняя тональность + средняя эмоциональность,  Adj. R-Squared: 0.46793
+
+```{r message=FALSE, warning=FALSE}
+pooling_1 = plm(log(FDI) ~ GDP_growth + Inflation + Unemployment + log(share_articles) + Average_sentiments + Average_emotion, data = panel_data_naomit, model = "pooling")
+summary(pooling_1) # значимы: инфляция-, безработица-, средняя эмоциональность-, средние сентименты+,  Adj. R-Squared: 0.46793
+vif(pooling_1) # нет мультиколлинеарности
+data.frame(residuals(pooling_1)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling_1.)) #  
+coeftest(pooling_1, vcov=vcovHC(pooling_1, type="HC0",cluster="group")) 
+```
+
+Базовая регрессия: рост ВВП + инфляция + безработица + прирост статей + средняя тональность + средняя эмоциональность, Adj. R-Squared:  0.48722
+
+```{r message=FALSE, warning=FALSE}
+pooling_percapita = plm(log(FDI) ~ GDP_growth_percapita + Inflation + Unemployment + growth_articles + Average_sentiments + Average_emotion, data = panel_data_naomit, model = "pooling")
+summary(pooling_percapita) # значимы: инфляция-, безработица-, прирост статей-, средняя эмоциональность-, средняя тональность+, Adj. R-Squared: 0.48962
+vif(pooling_percapita) # нет мультиколлинеарности
+data.frame(residuals(pooling_percapita)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling_percapita.)) #  
+coeftest(pooling_percapita, vcov=vcovHC(pooling_percapita, type="HC0",cluster="group")) 
+```
+
+Базовая регрессия: рост ВВП + инфляция + безработица + логарифм доли количества статей + прирост тональности + прирост эмоциональности
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+pooling2_1 <- plm(log(FDI) ~ GDP_growth + Inflation + Unemployment + log(share_articles) + diff_sentiment + diff_emotion, data = panel_data_naomit, model = "pooling")
+summary(pooling2_1) # значимы:инфляция-, безработица-
+vif(pooling2_1) # нет мультиколлинеарности
+data.frame(residuals(pooling2_1)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling2_1.)) #  
+coeftest(pooling2_1, vcov=vcovHC(pooling2_1, type="HC0",cluster="group"))
+```
+
+Базовая регрессия: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + средняя эмоциональность, 
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+pooling3_1 <- plm(log(FDI) ~ log(GDP_per_capita) + Inflation + Unemployment + growth_articles + Average_sentiments + Average_emotion, data = panel_data_naomit, model = "pooling")
+summary(pooling3_1)
+vif(pooling3_1) # нет мультиколлинеарности
+data.frame(residuals(pooling3_1)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling3_1.)) # 
+coeftest(pooling3_1, vcov=vcovHC(pooling3_1, type="HC0",cluster="group"))
+```
+
+Длинная регрессия: рост ВВП + инфляция + логарифм доли количества статей + тональность + эмоциональность + доля индекса рецессии + плохие/хорошие эмоции
+
+```{r}
+pooling4_1 = plm(log(FDI) ~ GDP_growth + Inflation + Unemployment + log(share_articles) + Average_sentiments + Average_emotion + share_recession + prop_good_Country, data = panel_data_naomit, model = "pooling")
+summary(pooling4_1) # значимы: безработица-, инфляция-, логарифм доли количества статей+, средняя тональность+, средняя эмоциональность-, Adj. R-Squared: 0.47084
+vif(pooling4_1) # нет мультиколлинеарности
+data.frame(residuals(pooling4_1)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling4_1.)) 
+coeftest(pooling4_1, vcov=vcovHC(pooling4_1, type="HC0", cluster="group"))
+```
+
+Длинная регрессия: рост ВВП + инфляция + прирост статей + тональность + эмоциональность + доля индекса рецессии + плохие/хорошие эмоции
+
+```{r}
+pooling_percapita_long = plm(log(FDI) ~ GDP_growth_percapita + Inflation + Unemployment + growth_articles + Average_sentiments + Average_emotion + share_recession + prop_good_Country, data = panel_data_naomit, model = "pooling")
+summary(pooling_percapita_long) # значимы: безработица-, инфляция-, прирост статей-, средняя эмоциональность-, доля положительных эмоций+, Adj. R-Squared: 0.50451
+vif(pooling_percapita_long) # нет мультиколлинеарности
+data.frame(residuals(pooling_percapita_long)) %>% ggplot() + geom_histogram(aes(x = residuals.pooling_percapita_long.)) 
+coeftest(pooling_percapita_long, vcov=vcovHC(pooling_percapita_long, type="HC0", cluster="group")) 
+```
+
+Длинная регрессия: логарифм ВВП на душу населения + инфляция + логарифм доли количества статей + тональность + эмоциональность + доля индекса рецессии + плохие/хорошие эмоции
+
+```{r}
+pooling5_1 = plm(log(FDI) ~ log(GDP_per_capita) + Inflation + Unemployment + growth_articles + Average_sentiments + Average_emotion + share_recession + prop_good_Country, data = panel_data_naomit, model = "pooling")
+summary(pooling5_1) # значимы: логарифм ВВП на душу населения+, инфляция-, логарифм доли количества статей+, средняя тональность+, средняя эмоциональность-, доля положительных эмоций+,  Adj. R-Squared: 0.76256
+vif(pooling5_1) # нет мультиколлинеарности
+data.frame(residuals(pooling5_1)) %>% ggplot() + geom_histogram(aes(x = pooling5_1))
+coeftest(pooling5_1, vcov=vcovHC(pooling5_1, type="HC0", cluster="group"))
+```
+
+Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + anger + fear + disgust + joy + sadness + surprise + trust
+
+```{r}
+pooling6_1 = plm(log(FDI) ~ GDP_growth + Inflation + Unemployment + anger + fear + disgust + joy + sadness + surprise + trust, data = panel_data_naomit, model = "pooling")
+summary(pooling6_1) # значимы: рост ВВП, fear, disgust, sadness, trust,  Adj. R-Squared: 0.33905
+vif(pooling6_1) # мультиколлинеарность
+```
+
+Отдельные эмоции в регрессии: рост ВВП + инфляция + безработица + логарифм доли количества статей + средняя тональность + trust
+
+```{r}
+pooling7_1 = plm(log(FDI) ~ GDP_growth + Inflation + Unemployment + growth_articles + Average_sentiments + trust, data = panel_data_naomit, model = "pooling")
+summary(pooling7_1) # значимы: рост ВВП+, инфляция-, прирост статей-, средняя тональность+, trust-, Adj. R-Squared: 0.49267
+vif(pooling7_1)  # нет мультиколлинеарности
+coeftest(pooling7_1, vcov=vcovHC(pooling7_1, type="HC0", cluster="group")) 
+```
+
+Отдельные эмоции в регрессии: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + fear
+
+```{r}
+pooling9_1 = plm(log(FDI) ~ log(GDP_per_capita) + Inflation + Unemployment + log(share_articles) + Average_sentiments + fear, data = panel_data_naomit, model = "pooling")
+summary(pooling9_1) # значимы: логарифм ВВП на душу населения+, инфляция-, логарифм доли количества статей+, средняя тональность+, fear-, Adj. R-Squared: 0.75606
+vif(pooling9_1) # нет мультиколлинеарности
+coeftest(pooling9_1, vcov=vcovHC(pooling9_1, type="HC0", cluster="group"))
+```
+
+Отдельные эмоции в регрессии: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + anger
+
+```{r}
+pooling11_1 = plm(log(FDI) ~ log(GDP_per_capita) + Inflation + Unemployment + log(share_articles) + Average_sentiments + anger, data = panel_data_naomit, model = "pooling") 
+summary(pooling11_1) # значимы: логарифм ВВП на душу населения+, инфляция-, логарифм доли количества статей+, средняя тональность+, anger-, Adj. R-Squared: 0.75583
+vif(pooling11_1) # нет мультиколлинеарности
+coeftest(pooling9_1, vcov=vcovHC(pooling9_1, type="HC0", cluster="group")) 
+```
+
+Отдельные эмоции в регрессии: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + sadness
+
+```{r}
+pooling13_1 = plm(log(FDI) ~ log(GDP_per_capita) + Inflation + Unemployment + log(share_articles) + Average_sentiments + sadness, data = panel_data_naomit, model = "pooling")
+summary(pooling13_1) # значимы: логарифм ВВП на душу населения+, инфляция-, логарифм доли количества статей+, средняя тональность+, sadness-, Adj. R-Squared: 0.75546
+vif(pooling13_1) # нет мультиколлинеарности
+coeftest(pooling9_1, vcov=vcovHC(pooling9_1, type="HC0", cluster="group")) # значимы: логарифм ВВП на душу населения+, инфляция-, логарифм доли количества статей+, средняя тональность+, sadness-
+```
+
+Отдельные эмоции в регрессии: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + disgust
+
+```{r}
+pooling15_1 = plm(log(FDI) ~ log(GDP_per_capita) + Inflation + Unemployment + log(share_articles) + Average_sentiments + disgust, data = panel_data_naomit, model = "pooling")
+summary(pooling15_1) # значимы: логарифм ВВП на душу населения+, инфляция-, логарифм доли количества статей+, средняя тональность+, disgust-, безработица+
+vif(pooling15_1) # нет мультиколлинеарности
+coeftest(pooling9_1, vcov=vcovHC(pooling9_1, type="HC0", cluster="group"))
+```
+
+Лучшие модели для 1992-2019: 
+
+Базовая регрессия: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + средняя эмоциональность, Adj. R-Squared: 0.75439
+Базовая регрессия: рост ВВП + инфляция + безработица + прирост статей + средняя тональность + средняя эмоциональность, Adj. R-Squared:  0.48722
+Длинная регрессия: логарифм ВВП на душу населения + инфляция + логарифм доли количества статей + тональность + эмоциональность + доля индекса рецессии + плохие/хорошие эмоции,  Adj. R-Squared: 0.75297
+Длинная регрессия: рост ВВП + инфляция + прирост статей + тональность + эмоциональность + доля индекса рецессии + плохие/хорошие эмоции, Adj. R-Squared: 0.48447
+Отдельные эмоции в регрессии: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + trust, Adj. R-Squared: 0.75338
+Отдельные эмоции в регрессии: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + fear, Adj. R-Squared: 0.75606
+Отдельные эмоции в регрессии: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + anger, Adj. R-Squared: 0.75583
+Отдельные эмоции в регрессии: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + sadness, Adj. R-Squared: 0.75546
+Отдельные эмоции в регрессии: логарифм ВВП на душу населения + инфляция + безработица + логарифм доли количества статей + средняя тональность + disgust, Adj. R-Squared: 0.76287
+
+Модели с эмоциями можно отдельно вынести в отдельную табличку (у всех эмоций, к тому же, отрицательный знак). Тогда остается сравнить модель базовой (pooling2_1) и длинной регрессии (pooling5_1).
+
+##### Сравнение моделей Pooled OLS: метрики качества
+
+```{r}
+RSS(pooling_percapita) # 239.8754
+RSS(pooling_percapita_long) # 229.3187
+
+RMSE(pooling_percapita$residuals) # 1.318419
+RMSE(pooling_percapita_long$residuals) # 1.289081
+
+MAE(pooling_percapita$residuals) # 1.063188
+MAE(pooling_percapita_long$residuals) # 1.033442
+```
+
+Наименьшие ошибки наблюдаются у длинной регрессии. Проведем тесты на линейный ограничения для сравнения базовой и длинной регрессий.
+
+```{r}
+xtable(linearHypothesis(pooling_percapita_long, c("prop_good_Country", "share_recession"),  vcov=vcovHC(pooling_percapita_long, type="HC0",cluster="group"))) # отвергаемся нулевая гипотеза -> коэффициенты значимы -> длинная модель регрессии
+```
+
+Выбираем длинную модель сквозной регрессии.
+
+Соберём в латех модели для отдельных эмоций, используя робастные кластерные ошибки.
+
+```{r message=FALSE, warning=FALSE}
+stargazer(coeftest(pooling7_1, vcov=vcovHC(pooling7_1, type="HC0",cluster="group")), 
+          coeftest(pooling9_1, vcov=vcovHC(pooling9_1, type="HC0",cluster="group")), 
+          coeftest(pooling11_1, vcov=vcovHC(pooling11_1, type="HC0",cluster="group")), 
+          coeftest(pooling13_1, vcov=vcovHC(pooling13_1, type="HC0",cluster="group")), 
+          coeftest(pooling15_1, vcov=vcovHC(pooling15_1, type="HC0",cluster="group")),
+          title="Результаты сквозных регрессий с использованием конкретных эмоций", 
+          label="tab:reg_emotion", 
+          dep.var.labels='Доля ПИИ от ВВП', 
+          covariate.labels=c("Рост ВВП","Инфляция", "Безработица","Доля количества статей","Средняя тональность","Trust", "Fear", "Anger", "Sadness", "Disgust", "Constant"),
+          align=TRUE, no.space=TRUE, 
+          column.sep.width = "-10pt", 
+          df = FALSE,
+          decimal.mark = ',', 
+          column.labels=c("Pooled OLS (trust)", "Pooled OLS (fear)", "Pooled OLS (anger)", "Pooled OLS (sadness)", "Pooled OLS (disgust)"))
+
+stargazer(pooling7_1, 
+          pooling9_1, 
+          pooling11_1, 
+          pooling13_1, 
+          pooling15_1,
+          title="Результаты сквозных регрессий с использованием конкретных эмоций", 
+          dep.var.labels='Доля ПИИ от ВВП', 
+          align=TRUE, no.space=TRUE, column.sep.width = "-10pt", decimal.mark = ',', 
+          column.labels=c("Pooled OLS (trust)", "Pooled OLS (fear)", "Pooled OLS (anger)", "Pooled OLS (sadness)", "Pooled OLS (disgust)"))
+```
+
+### Fixed-Effects
+
+Индивидуальные эффекты.
+
+```{r message=FALSE, warning=FALSE}
+fixed_individ_percapita <- plm(log(FDI) ~ lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth_percapita, 1) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(Average_emotion, 1) + growth_articles + lag(share_recession, 1) + lag(prop_good_Country, 1), data = panel_data_naomit, model = "within", effect = 'individual', index = c('Country', 'year') ) # значимы: лаг инвестиций+, лаг безработицы+, лаг инфляции, 1 лаг роста ВВП на душу+, 1 лаг прироста количества статей-, 1 лаг средней эмоциональности+, Adj. R-Squared: 0.74061
+summary(fixed_individ_percapita)
+fixef(fixed_individ_percapita)
+check_autocorrelation(fixed_individ_percapita)
+coeftest(fixed_individ_percapita, vcov=vcovHC(fixed_individ_percapita, type="HC0", cluster="group")) 
+
+# метрики качества модели
+RSS(fixed_individ_percapita) # 59.82842
+RMSE(fixed_individ_percapita$residuals) # 0.6732352
+MAE(fixed_individ_percapita$residuals) # 0.46949
+```
+
+Индивидуальный и временной эффекты.
+
+```{r message=FALSE, warning=FALSE}
+fixed_two_percapita <- plm(log(FDI) ~ lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth_percapita, 1) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(Average_emotion, 1) + growth_articles + lag(share_recession, 1) + lag(prop_good_Country, 1), data = panel_data_naomit, model = "within", effect = 'twoway', index = c('Country', 'year') ) # значимы: лаг инвестиций+, 1 лаг роста ВВП на душу+, 1 лаг прироста количества статей-, 1 лаг средней эмоциональности+, Adj. R-Squared: 0.037535
+summary(fixed_two_percapita)
+fixef(fixed_two_percapita)
+check_autocorrelation(fixed_two_percapita)
+coeftest(fixed_two_percapita, vcov=vcovHC(fixed_two_percapita, type="HC0", cluster="group")) 
+
+# метрики качества модели
+RSS(fixed_two_percapita) # 34.56839
+RMSE(fixed_two_percapita$residuals) # 0.5117438
+MAE(fixed_two_percapita$residuals) # 0.3704701
+```
+
+Сравнение сквозной регрессии и моделей с фиксированными эффектами.
+
+```{r}
+pFtest(fixed_individ_percapita, pooling_percapita_long) # p-value 0.00000000000000022
+pFtest(fixed_two_percapita, pooling_percapita_long) # p-value 0.00000000000000022
+```
+
+Anger
+
+```{r}
+fixed_anger <- plm(log(FDI) ~ lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2) + lag(anger, 1), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') )
+summary(fixed_anger)
+check_autocorrelation(fixed_anger)
+coeftest(fixed_anger, vcov=vcovHC(fixed_anger, type="HC0", cluster="group"))
+```
+
+Sadness
+
+```{r}
+fixed_sadness <- plm(log(FDI) ~ lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2) + lag(sadness, 1), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') )
+summary(fixed_sadness)
+check_autocorrelation(fixed_sadness)
+coeftest(fixed_sadness, vcov=vcovHC(fixed_sadness, type="HC0", cluster="group"))
+```
+
+Fear
+
+```{r}
+fixed_fear <- plm(log(FDI) ~ lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2) + lag(fear, 1), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') )
+summary(fixed_fear)
+check_autocorrelation(fixed_fear)
+coeftest(fixed_fear, vcov=vcovHC(fixed_fear, type="HC0", cluster="group"))
+```
+
+Disgust
+
+```{r}
+fixed_disgust <- plm(log(FDI) ~ lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2) + lag(disgust, 1), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') )
+summary(fixed_disgust)
+check_autocorrelation(fixed_disgust)
+coeftest(fixed_disgust, vcov=vcovHC(fixed_disgust, type="HC0", cluster="group"))
+```
+
+Trust
+
+```{r}
+fixed_trust <- plm(log(FDI) ~ lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth, 1:2) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(share_articles, 1) + lag(share_recession, 1:2) + lag(trust, 1), data = data_for_panel_regression9219, model = "within", effect = 'twoways', index = c('Country', 'year') )
+summary(fixed_trust)
+check_autocorrelation(fixed_trust)
+coeftest(fixed_trust, vcov=vcovHC(fixed_trust, type="HC0", cluster="group"))
+```
+
+Соберём в латех модели для отдельных эмоций, используя робастные кластерные ошибки.
+
+```{r message=FALSE, warning=FALSE}
+stargazer(coeftest(fixed_trust, vcov=vcovHC(fixed_trust, type="HC0",cluster="group")), 
+          coeftest(fixed_fear, vcov=vcovHC(fixed_fear, type="HC0",cluster="group")), 
+          coeftest(fixed_anger, vcov=vcovHC(fixed_anger, type="HC0",cluster="group")), 
+          coeftest(fixed_sadness, vcov=vcovHC(fixed_sadness, type="HC0",cluster="group")), 
+          coeftest(fixed_disgust, vcov=vcovHC(fixed_disgust, type="HC0",cluster="group")),
+          title="Результаты моделей с фиксированными эффектами с использованием конкретных эмоций", 
+          label="tab:reg_emotion_fixed", 
+          dep.var.labels='Доля ПИИ от ВВП', 
+          #covariate.labels=c("Рост ВВП","Инфляция", "Безработица","Доля количества статей","Средняя тональность","Trust", "Fear", "Anger", "Sadness", "Disgust", "Constant"),
+          align=TRUE, no.space=TRUE, 
+          column.sep.width = "-10pt", 
+          df = FALSE,
+          decimal.mark = ',', 
+          column.labels=c("Fixed-Effects (trust)", "Fixed-Effects (fear)", "Fixed-Effects (anger)", "Fixed-Effects (sadness)", "Fixed-Effects (disgust)"))
+
+stargazer(fixed_trust, 
+          fixed_fear, 
+          fixed_anger, 
+          fixed_sadness, 
+          fixed_disgust,
+          title="Результаты моделей с фиксированными эффектами с использованием конкретных эмоций", 
+          dep.var.labels='Доля ПИИ от ВВП', 
+          align=TRUE, no.space=TRUE, column.sep.width = "-10pt", decimal.mark = ',', 
+          column.labels=c("Fixed-Effects (trust)", "Fixed-Effects (fear)", "Fixed-Effects (anger)", "Fixed-Effects (sadness)", "Fixed-Effects (disgust)"))
+```
+
+# Столбчатая диаграмма для модели Fixed с двойным эффектом
+
+```{r message=FALSE, warning=FALSE}
+data_fixed = data.frame(tidy(fixef(fixed_two_percapita, effect = 'time')))
+
+fixed_year_graph = data_fixed %>% ggplot() +
+  geom_bar(aes(x = as.numeric(names), y = x), stat = 'identity', fill = '#A9CCE3', col = '#2980B9') +
+  labs(#title = 'Коэффициент при переменной year\nв объединённой регрессии 2',
+       x = '',
+       y = 'Значение фиксированных эффектов времени') +
+  theme_classic(base_size = 14) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 12)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 15))
+fixed_year_graph
+ggsave('fixed_year_graph2.png', width = 10, height = 7)
+```
+
+### First-Difference
+
+Базовая регрессия, fd: lag(log(FDI)) + lag(Unemployment, 1) + lag(GDP_growth, 1) + lag(Inflation, 1) + Average_emotion + Average_sentiments + growth_articles
+
+```{r}
+fd_percapita <- plm(log(FDI) ~ lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth_percapita, 1) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(Average_emotion, 1) + growth_articles - 1, data = panel_data_naomit, model = "fd", effects = 'twoways', index = c('Country', 'year')) # значимы: 1 лаг инвестиций+, инфляция-
+summary(fd_percapita) # Adj. R-Squared: 0.09179
+coeftest(fd_percapita, vcov=vcovHC(fd, type="HC0", cluster="group")) 
+
+# метрики качества модели
+RSS(fd_percapita) # 71.26992
+RMSE(fd_percapita$residuals) # 0.7491198
+MAE(fd_percapita$residuals) # 0.5083612
+```
+
+Длинная регрессия, fd_percapita_long: lag(log(FDI)) + lag(Unemployment, 1) + lag(GDP_growth, 1) + lag(Inflation, 1) + Average_sentiments + Average_emotion + growth_articles + prop_good_Country + share_recession
+
+```{r message=FALSE, warning=FALSE}
+fd_percapita_long <- plm(log(FDI) ~ lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth_percapita, 1) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(Average_emotion, 1) + growth_articles + lag(prop_good_Country, 1) + lag(share_recession, 1) - 1, data = panel_data_naomit, model = "fd", index = c('Country', 'year')) # значимы: 1 лаг инвестиций+, инфляция-
+summary(fd_percapita_long) # Adj. R-Squared: 0.087043
+coeftest(fd_percapita_long, vcov=vcovHC(fd_percapita_long, type="HC0", cluster="group")) 
+
+# метрики качества модели
+RSS(fd_percapita_long) # 70.32985
+RMSE(fd_percapita_long$residuals) # 0.7441629
+MAE(fd_percapita_long$residuals) # 0.5152807
+```
+
+Тест на линейные ограничения.
+
+```{r}
+xtable(linearHypothesis(fd_percapita_long, c("lag(prop_good_Country)", "lag(share_recession)"),  vcov=vcovHC(fd_percapita_long, type="HC0",cluster="group"))) # отвергаемся нулевая гипотеза -> коэффициенты значимы
+```
+
+### Random Effects
+
+```{r message=FALSE, warning=FALSE}
+random_percapita <- plm(log(FDI) ~  lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth_percapita, 1) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(Average_emotion, 1) + growth_articles + lag(share_recession, 1) + lag(prop_good_Country, 1), data = panel_data_naomit, model = 'random', random.method = "amemiya") 
+summary(random_percapita) # Adj. R-Squared: 0.74398
+punbalancedness(random_percapita)
+
+coeftest(random_percapita, vcov=vcovHC(random_percapita, type="HC0", cluster="group"))
+
+# метрики качества модели
+RSS(random_percapita) # 61.16172
+RMSE(random_percapita$residuals) # 0.6806955
+MAE(random_percapita$residuals) # 0.4737931
+
+phtest(fixed_individ, random_percapita) # 0.9807
+phtest(fixed_two_percapita, random_percapita) # 0.1717
+pFtest(random_percapita, pooling_percapita_long) # 0.00000000000000022
+```
+
+### Тесты на автокорреляцию и гетероскедастичность
+
+```{r}
+pbgtest(fixed_individ_percapita)
+pbgtest(fixed_two_percapita)
+pbgtest(fd_percapita_long)
+pbgtest(random_percapita)
+
+bptest(log(FDI) ~  lag(log(FDI), 1) + lag(Unemployment, 1) + lag(GDP_growth_percapita, 1) + lag(Inflation, 1) + lag(Average_sentiments, 1) + lag(Average_emotion, 1) + growth_articles + lag(share_recession, 1) + lag(prop_good_Country, 1), data = panel_data_naomit, studentize = F) # гипотеза о гомоскедастичности отвергается
+```
+    
+Соберём в латех модели сквозных регрессий, с фиксированными эффектами и первыми разницами.
+
+```{r message=FALSE, warning=FALSE}
+stargazer(pooling_percapita, 
+          coeftest(pooling_percapita, vcov=vcovHC(pooling_percapita, type="HC0",cluster="group")), 
+          pooling_percapita_long,
+          coeftest(pooling_percapita_long, vcov=vcovHC(pooling_percapita_long, type="HC0",cluster="group")), 
+          fixed_individ_percapita,
+          coeftest(fixed_individ_percapita, vcov=vcovHC(fixed_individ_percapita, type="HC0", cluster="group")),
+          fixed_two_percapita,
+          coeftest(fixed_two_percapita, vcov=vcovHC(fixed_two_percapita, type="HC0", cluster="group")),
+          fd_percapita_long,
+          coeftest(fd_percapita_long, vcov=vcovHC(fd_percapita_long, type="HC0", cluster="group")),
+          random_percapita,
+          coeftest(random_percapita, vcov=vcovHC(random_percapita, type="HC0", cluster="group")),
+          title="Результаты регрессий", 
+          label="tab:regressions_FDIlog", 
+          dep.var.labels='Логарифм ПИИ', 
+          #covariate.labels=c("Рост ВВП","Инфляция", "Безработица", "Доля количества статей", "Средняя тональность", "Средняя эмоциональность", "Доля индекса рецессии", "Доля положительных эмоций", "Лаг ПИИ от ВВП", "Лаг Безработица", "1 Лаг рост ВВП", "2 Лаг рост ВВП", "Лаг рост ВВП", "Лаг Инфляция", "Лаг  Средняя эмоциональность", "Лаг Средняя тональность", "Лаг Доля количества статей", "1 Лаг Доля количества статей", "2 Лаг Доля количества статей", "Constant"),
+          align=TRUE, no.space=TRUE, 
+          column.sep.width = "-2pt", 
+          df = FALSE,
+          decimal.mark = ',', float.env = "sidewaystable")
+          # column.labels=c("Pooled OLS (rest.)", "Pooled OLS (unrest.)", "Pooled OLS (rest.)", "Pooled OLS (unrest.)", "Fixed-effects", "First-Difference", "First-Difference"))
+```
+
+# Корреляция ошибки и регрессоров
+
+```{r}
+# fixed model
+panel_data_naomit$residuals_fixed = ifelse(!is.na(log(panel_data_naomit$FDI)), fixed$residuals, NA)
+cor(panel_data_naomit$residuals_fixed, lag(log(panel_data_naomit$FDI)), use = 'pairwise.complete.obs')
+
+# pooling model
+panel_data_naomit$residuals_pooling = ifelse(!is.na(log(panel_data_naomit$FDI)), pooling5_1$residuals, NA)
+cor(panel_data_naomit$residuals_pooling, lag(log(panel_data_naomit$FDI)), use = 'pairwise.complete.obs')
+
+# first difference model
+panel_data_naomit$residuals_fd = ifelse(!is.na(log(panel_data_naomit$FDI)), fd6$residuals, NA)
+cor(panel_data_naomit$residuals_fd, lag(log(panel_data_naomit$FDI)), use = 'pairwise.complete.obs')
+
+# random model
+panel_data_naomit$residuals_random = ifelse(!is.na(log(panel_data_naomit$FDI)), random$residuals, NA)
+cor(panel_data_naomit$residuals_random, lag(log(panel_data_naomit$FDI)), use = 'pairwise.complete.obs')
+```
